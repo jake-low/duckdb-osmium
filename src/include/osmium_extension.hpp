@@ -16,4 +16,4 @@ public:
 	std::string Version() const override;
 };
 
-}
+} // namespace duckdb

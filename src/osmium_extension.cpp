@@ -791,7 +791,8 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 	bool use_mp_manager = bind_data.kind_filter.NeedsMultipolygonManager() && state->needs_geometry;
 	if (use_mp_manager) {
 		osmium::area::Assembler::config_type assembler_config;
-		state->mp_manager = std::make_unique<RelationAreaManager<osmium::area::Assembler>>(assembler_config, bind_data.tag_predicates);
+		state->mp_manager =
+		    std::make_unique<RelationAreaManager<osmium::area::Assembler>>(assembler_config, bind_data.tag_predicates);
 
 		// Read relations, feed them to the MP manager (which filters
 		// using MatchesTags internally), and collect member way IDs
@@ -1050,12 +1051,11 @@ std::string OsmiumExtension::Version() const {
 #endif
 }
 
-}
+} // namespace duckdb
 
 extern "C" {
 
 DUCKDB_CPP_EXTENSION_ENTRY(osmium, loader) {
 	LoadInternal(loader);
 }
-
 }
