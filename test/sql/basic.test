@@ -1,0 +1,57 @@
+# name: test/sql/basic.test
+# description: basic counts, column values, and error handling
+# group: [sql]
+
+require osmium
+
+statement error
+SELECT * FROM osmium_read('nonexistent.osm.pbf');
+----
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm');
+----
+711
+
+query TI
+SELECT kind, count(*) FROM osmium_read('test/data/bainbridge.osm') GROUP BY kind ORDER BY kind;
+----
+area	77
+line	304
+node	317
+relation	13
+
+query TI
+SELECT type, count(*) FROM osmium_read('test/data/bainbridge.osm') GROUP BY type ORDER BY type;
+----
+node	317
+relation	14
+way	380
+
+query TTI
+SELECT kind, type, count(*) FROM osmium_read('test/data/bainbridge.osm') GROUP BY kind, type ORDER BY kind, type;
+----
+area	relation	1
+area	way	76
+line	way	304
+node	node	317
+relation	relation	13
+
+query IT
+SELECT id, tags['name'] FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND tags['name'] IS NOT NULL ORDER BY id LIMIT 3;
+----
+609981906	Ba Sa
+609984211	Blackbird Bakery
+609994795	Kingfisher
+
+query IT
+SELECT id, tags['name'] FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND tags['name'] IS NOT NULL ORDER BY id LIMIT 3;
+----
+5913873	Winslow Way East
+5914665	Madison Avenue North
+5914712	Madison Avenue South
+
+query I
+SELECT count(*) FROM 'test/data/bainbridge.osm';
+----
+711

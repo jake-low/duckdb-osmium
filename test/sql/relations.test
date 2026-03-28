@@ -1,0 +1,65 @@
+# name: test/sql/relations.test
+# description: relation members and relation-based multipolygon areas
+# group: [sql]
+
+require osmium
+
+# Relation members
+
+query I
+SELECT list_count(refs) > 0 FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' AND id = 1626887;
+----
+true
+
+# Non-relations have NULL for all member columns
+query III
+SELECT refs IS NULL, ref_roles IS NULL, ref_types IS NULL FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' ORDER BY id LIMIT 1;
+----
+true	true	true
+
+# Relation 1626895 is a route_master with 3 relation members
+query ITT
+SELECT unnest(refs), unnest(ref_types), unnest(ref_roles) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' AND id = 1626895;
+----
+1626892	relation	(empty)
+1626887	relation	(empty)
+1626888	relation	(empty)
+
+# Relation 1626887 is a route with node and way members including roles
+query ITT
+SELECT unnest(refs), unnest(ref_types), unnest(ref_roles) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' AND id = 1626887 LIMIT 5;
+----
+48540742	node	stop
+1327013346	node	stop
+1323968106	node	stop
+5914777	way	(empty)
+117890282	way	(empty)
+
+# Relation-based multipolygon areas
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND id = 19821512 AND geometry IS NOT NULL;
+----
+area	relation	19821512
+
+query T
+SELECT tags['building'] FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND id = 19821512 AND geometry IS NOT NULL;
+----
+retail
+
+# 76 way-based + 1 relation-based = 77
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND geometry IS NOT NULL;
+----
+77
+
+# Relation-based areas appear even when geometry is not projected.
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND id = 19821512;
+----
+area	relation	19821512
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area';
+----
+77

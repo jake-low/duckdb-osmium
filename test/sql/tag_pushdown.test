@@ -1,0 +1,132 @@
+# name: test/sql/tag_pushdown.test
+# description: tag predicate pushdown, OR/negation fallback, MP manager AND filtering
+# group: [sql]
+
+require osmium
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND tags['highway'] IS NOT NULL;
+----
+202
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND tags['highway'] = 'crossing';
+----
+21
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND tags['building'] IS NOT NULL;
+----
+43
+
+# Without kind filter (reads all entity types)
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['highway'] IS NOT NULL;
+----
+233
+
+query TI
+SELECT kind, count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['highway'] IS NOT NULL GROUP BY kind ORDER BY kind;
+----
+area	1
+line	202
+node	30
+
+# Multiple tag predicates
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND tags['building'] IS NOT NULL AND tags['name'] IS NOT NULL;
+----
+11
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND tags['highway'] IS NOT NULL AND tags['name'] IS NOT NULL;
+----
+11
+
+# IS NOT NULL + equality
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND tags['building'] = 'yes' AND tags['name'] IS NOT NULL;
+----
+5
+
+# Count-only with tag predicate (tags column not projected)
+
+# The handler filters using pushed-down predicates against osmium's TagList
+# even when the tags column itself is pruned by projection pushdown.
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['name'] IS NOT NULL;
+----
+109
+
+# Empty result set
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['nonexistent_key'] IS NOT NULL;
+----
+0
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND tags['building'] IS NOT NULL;
+----
+0
+
+# OR predicates (not pushed down, evaluated by DuckDB)
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND (tags['highway'] IS NOT NULL OR tags['amenity'] IS NOT NULL);
+----
+123
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND (tags['amenity'] = 'cafe' OR tags['amenity'] = 'restaurant');
+----
+9
+
+# Mixed pushdown + non-pushdown predicates
+
+# IS NOT NULL is pushed down; the OR is not. Both must be satisfied.
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND tags['highway'] IS NOT NULL AND (tags['surface'] = 'asphalt' OR tags['surface'] = 'gravel');
+----
+18
+
+# Negated predicates (not pushed down)
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND tags['highway'] IS NULL;
+----
+287
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND tags['highway'] IS NOT NULL AND tags['highway'] != 'crossing';
+----
+9
+
+# MP manager AND-predicate filtering
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND tags['building'] = 'retail' AND tags['name'] IS NOT NULL;
+----
+1
+
+query TI
+SELECT type, id FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND tags['building'] = 'retail' AND tags['name'] IS NOT NULL;
+----
+way	449026920
+
+query TI
+SELECT type, id FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND tags['building'] = 'retail' AND tags['name'] IS NOT NULL AND geometry IS NOT NULL;
+----
+way	449026920
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND tags['building'] IS NOT NULL AND geometry IS NOT NULL;
+----
+43
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND tags['building'] IS NOT NULL AND tags['name'] IS NOT NULL AND geometry IS NOT NULL;
+----
+11

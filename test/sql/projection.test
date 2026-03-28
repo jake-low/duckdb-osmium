@@ -1,0 +1,52 @@
+# name: test/sql/projection.test
+# description: projection pushdown for various column subsets
+# group: [sql]
+
+require osmium
+
+query I
+SELECT id FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' ORDER BY id LIMIT 3;
+----
+609981906
+609984211
+609994795
+
+query TI
+SELECT kind, id FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' ORDER BY id LIMIT 1;
+----
+node	609981906
+
+query TI
+SELECT type, id FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' ORDER BY id LIMIT 1;
+----
+relation	1626887
+
+query I
+SELECT geometry IS NOT NULL FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' ORDER BY id LIMIT 1;
+----
+true
+
+query I
+SELECT geometry IS NOT NULL FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND id = 5913873;
+----
+true
+
+query I
+SELECT geometry IS NOT NULL FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND tags['building'] IS NOT NULL ORDER BY id LIMIT 3;
+----
+true
+true
+true
+
+query I
+SELECT geometry IS NULL FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' ORDER BY id LIMIT 3;
+----
+true
+true
+true
+
+# LIMIT with area geometry (cancellation during MP manager path)
+query I
+SELECT count(*) FROM (SELECT id, geometry FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND tags['building'] IS NOT NULL LIMIT 1);
+----
+1

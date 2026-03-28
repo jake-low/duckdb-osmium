@@ -1,0 +1,74 @@
+# name: test/sql/kind_filter.test
+# description: kind filter pushdown, dual emission of closed ways, area=yes/no semantics
+# group: [sql]
+
+require osmium
+
+# Kind filter pushdown
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node';
+----
+317
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line';
+----
+304
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area';
+----
+77
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation';
+----
+13
+
+# kind IN (...) is not pushed down; falls back to DuckDB-side filtering
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'relation');
+----
+330
+
+query TI
+SELECT kind, count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'relation') GROUP BY kind ORDER BY kind;
+----
+node	317
+relation	13
+
+# Closed ways without area=yes/no are emitted as both line and area
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/bainbridge.osm') WHERE id = 52384079 ORDER BY kind;
+----
+area	way	52384079
+line	way	52384079
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('line', 'area');
+----
+381
+
+# area=yes / area=no semantics
+
+query TI
+SELECT kind, id FROM osmium_read('test/data/bainbridge.osm') WHERE id = 1456812001 ORDER BY kind;
+----
+area	1456812001
+
+query TI
+SELECT kind, id FROM osmium_read('test/data/bainbridge.osm') WHERE id = 1270809431 ORDER BY kind;
+----
+area	1270809431
+
+query TI
+SELECT kind, id FROM osmium_read('test/data/bainbridge.osm') WHERE id = 1066832669 ORDER BY kind;
+----
+line	1066832669
+
+query TI
+SELECT kind, id FROM osmium_read('test/data/bainbridge.osm') WHERE id = 448047207 ORDER BY kind;
+----
+line	448047207
