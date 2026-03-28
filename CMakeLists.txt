@@ -28,8 +28,7 @@ build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
 foreach(EXT_TARGET ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
-    # libosmium requires C++17
-    set_target_properties(${EXT_TARGET} PROPERTIES CXX_STANDARD 17)
+    set_target_properties(${EXT_TARGET} PROPERTIES CXX_STANDARD 14)
     target_include_directories(${EXT_TARGET} SYSTEM PRIVATE
         ${LIBOSMIUM_INCLUDE_DIR}
         ${PROTOZERO_INCLUDE_DIR})
