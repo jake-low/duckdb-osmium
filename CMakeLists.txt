@@ -8,13 +8,9 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 project(${TARGET_NAME})
 include_directories(src/include)
 
-# libosmium and protozero are header-only. Find them from system paths.
-find_path(LIBOSMIUM_INCLUDE_DIR osmium/version.hpp
-    HINTS /opt/homebrew/include /usr/local/include /usr/include
-    REQUIRED)
-find_path(PROTOZERO_INCLUDE_DIR protozero/version.hpp
-    HINTS /opt/homebrew/include /usr/local/include /usr/include
-    REQUIRED)
+# libosmium and protozero are header-only.
+find_path(LIBOSMIUM_INCLUDE_DIR osmium/version.hpp REQUIRED)
+find_path(PROTOZERO_INCLUDE_DIR protozero/version.hpp REQUIRED)
 
 # zlib (required for PBF decompression)
 find_package(ZLIB REQUIRED)
