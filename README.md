@@ -4,7 +4,7 @@ An extension for [duckdb](https://duckdb.org) that allows reading OpenStreetMap 
 
 DuckDB's first-party [`spatial` extension](https://duckdb.org/docs/stable/core_extensions/spatial/overview) can also read OSM PBF files using the [`ST_ReadOSM()`](https://duckdb.org/docs/stable/core_extensions/spatial/functions#st_readosm) function. However, this method returns rows in OSM's native data model (Nodes, Ways, and Relations). `duckdb-osmium`, in contrast, uses libosmium to reconstruct geometries for OSM elements and returns data including a geometry column containing Points, LineStrings, or Polygons/MultiPolygons.
 
-This extension supports predicate pushdown (so elements whose tags are excluded by the WHERE clause won't be processed) and projection pushdown (so that if you don't SELECT the geometry column in your query, geometry construction is skipped internally).
+This extension supports predicate pushdown (so elements that don't match the WHERE clause won't be processed) and projection pushdown (so that if you don't SELECT the geometry column in your query, geometry construction is skipped internally).
 
 ## Examples
 
