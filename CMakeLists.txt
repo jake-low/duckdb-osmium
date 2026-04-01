@@ -33,6 +33,9 @@ foreach(EXT_TARGET ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
         ${LIBOSMIUM_INCLUDE_DIR}
         ${PROTOZERO_INCLUDE_DIR})
     target_link_libraries(${EXT_TARGET} ZLIB::ZLIB EXPAT::EXPAT Threads::Threads)
+    # add NOMINMAX on Windows to prevent windows.h from defining macros that
+    # conflict with stdlib function names.
+    target_compile_definitions(${EXT_TARGET} PRIVATE $<$<PLATFORM_ID:Windows>:NOMINMAX>)
 endforeach()
 
 install(
