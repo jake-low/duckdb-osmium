@@ -72,6 +72,18 @@ SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node'
 ----
 0
 
+# tags['key'] IN (...) predicate pushdown
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND tags['amenity'] IN ('cafe', 'restaurant');
+----
+9
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND tags['highway'] IN ('primary', 'secondary', 'tertiary');
+----
+6
+
 # OR predicates (not pushed down, evaluated by DuckDB)
 
 query I

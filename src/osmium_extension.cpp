@@ -35,7 +35,6 @@
 #include <osmium/visitor.hpp>
 
 #include <cstring>
-#include <memory>
 
 enum OsmKind : uint8_t { KIND_NODE = 0, KIND_LINE = 1, KIND_AREA = 2, KIND_RELATION = 3 };
 enum OsmType : uint8_t { TYPE_NODE = 0, TYPE_WAY = 1, TYPE_RELATION = 2 };
@@ -68,8 +67,7 @@ struct KindFilter {
 
 struct TagPredicate {
 	std::string key;
-	std::string value;
-	bool has_value = false; // false means key-exists check; true means key=value equality
+	std::unordered_set<std::string> values; // empty = key-exists check; non-empty = value IN values
 };
 
 static const char *KIND_NAMES[] = {"node", "line", "area", "relation"};
@@ -91,13 +89,17 @@ static constexpr idx_t NUM_COLUMNS = 8;
 // Check whether an element's tags satisfy all pushed-down predicates.
 // DuckDB makes OR predicates opaque to us (and evaluates them as a
 // post-filter) so we only have to worry about AND semantics here.
-static bool MatchesTags(const osmium::TagList &tags, const std::vector<TagPredicate> &predicates) {
+static bool MatchesTagPredicate(const osmium::TagList &tags, const TagPredicate &pred) {
+	const char *val = tags.get_value_by_key(pred.key.c_str());
+	if (!val) {
+		return false;
+	}
+	return pred.values.empty() || pred.values.count(val);
+}
+
+static bool MatchesTagPredicates(const osmium::TagList &tags, const std::vector<TagPredicate> &predicates) {
 	for (const auto &pred : predicates) {
-		const char *val = tags.get_value_by_key(pred.key.c_str());
-		if (!val) {
-			return false;
-		}
-		if (pred.has_value && std::strcmp(val, pred.value.c_str()) != 0) {
+		if (!MatchesTagPredicate(tags, pred)) {
 			return false;
 		}
 	}
@@ -124,7 +126,7 @@ public:
 		if (std::strcmp(type, "multipolygon") != 0 && std::strcmp(type, "boundary") != 0) {
 			return false;
 		}
-		if (!MatchesTags(relation.tags(), m_predicates)) {
+		if (!MatchesTagPredicates(relation.tags(), m_predicates)) {
 			return false;
 		}
 		return std::any_of(
@@ -341,7 +343,7 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 					continue;
 				}
 
-				if (!MatchesTags(area.tags(), state.tag_predicates)) {
+				if (!MatchesTagPredicates(area.tags(), state.tag_predicates)) {
 					// TODO: is this necessary? we already checked in RelationAreaManager::new_relation(),
 					// so I think tags will always match here
 					continue;
@@ -372,7 +374,7 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 			if (node.tags().empty()) {
 				continue;
 			}
-			if (!MatchesTags(node.tags(), preds)) {
+			if (!MatchesTagPredicates(node.tags(), preds)) {
 				continue;
 			}
 			OsmRow row;
@@ -395,7 +397,7 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 
 	if (filter.lines || filter.areas) {
 		for (auto &way : buffer.select<osmium::Way>()) {
-			if (!MatchesTags(way.tags(), preds)) {
+			if (!MatchesTagPredicates(way.tags(), preds)) {
 				continue;
 			}
 
@@ -476,7 +478,7 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 				if (state.needs_geometry || !filter.areas) {
 					continue;
 				}
-				if (!MatchesTags(relation.tags(), preds)) {
+				if (!MatchesTagPredicates(relation.tags(), preds)) {
 					continue;
 				}
 				OsmRow row;
@@ -493,7 +495,7 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 			if (!filter.relations) {
 				continue;
 			}
-			if (!MatchesTags(relation.tags(), preds)) {
+			if (!MatchesTagPredicates(relation.tags(), preds)) {
 				continue;
 			}
 
@@ -654,8 +656,9 @@ static std::string TryExtractMapKey(const duckdb::Expression &expr, const duckdb
 }
 
 // Try to extract a tag predicate from:
-//   tags['key'] IS NOT NULL  ->  TagPredicate{key, "", false}
-//   tags['key'] = 'value'    ->  TagPredicate{key, value, true}
+//   tags['key'] IS NOT NULL          ->  TagPredicate{key, {}}
+//   tags['key'] = 'value'            ->  TagPredicate{key, {"value"}}
+//   tags['key'] IN ('v1', 'v2', ...) ->  TagPredicate{key, {"v1", "v2", ...}}
 static bool TryExtractTagPredicate(const duckdb::Expression &expr, const duckdb::LogicalGet &get, idx_t table_index,
                                    TagPredicate &out) {
 	// Case 1: IS NOT NULL(map_extract_value(tags, 'key'))
@@ -669,7 +672,6 @@ static bool TryExtractTagPredicate(const duckdb::Expression &expr, const duckdb:
 			return false;
 		}
 		out.key = std::move(key);
-		out.has_value = false;
 		return true;
 	}
 
@@ -705,12 +707,38 @@ static bool TryExtractTagPredicate(const duckdb::Expression &expr, const duckdb:
 		}
 
 		out.key = std::move(key);
-		out.value = val_const.value.GetValue<std::string>();
-		out.has_value = true;
+		out.values = {val_const.value.GetValue<std::string>()};
 		return true;
 	}
 
-	// TODO: handle predicates like tags['key'] IN ('value1', 'value2')
+	// Case 3: COMPARE_IN(map_extract_value(tags, 'key'), 'v1', 'v2', ...)
+	if (expr.GetExpressionType() == duckdb::ExpressionType::COMPARE_IN) {
+		auto &op = expr.Cast<duckdb::BoundOperatorExpression>();
+		if (op.children.size() < 2) {
+			return false;
+		}
+
+		auto key = TryExtractMapKey(*op.children[0], get, table_index);
+		if (key.empty()) {
+			return false;
+		}
+
+		std::unordered_set<std::string> vals;
+		for (idx_t i = 1; i < op.children.size(); i++) {
+			if (op.children[i]->GetExpressionClass() != duckdb::ExpressionClass::BOUND_CONSTANT) {
+				return false;
+			}
+			auto &c = op.children[i]->Cast<duckdb::BoundConstantExpression>();
+			if (c.value.type().id() != duckdb::LogicalTypeId::VARCHAR) {
+				return false;
+			}
+			vals.insert(c.value.GetValue<std::string>());
+		}
+
+		out.key = std::move(key);
+		out.values = std::move(vals);
+		return true;
+	}
 
 	return false;
 }
@@ -795,7 +823,7 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 		    std::make_unique<RelationAreaManager<osmium::area::Assembler>>(assembler_config, bind_data.tag_predicates);
 
 		// Read relations, feed them to the MP manager (which filters
-		// using MatchesTags internally), and collect member way IDs
+		// using MatchesTagPredicates internally), and collect member way IDs
 		// so the selective resolver knows which ways need locations.
 		osmium::io::Reader rel_reader {bind_data.file_path, osmium::osm_entity_bits::relation};
 		while (osmium::memory::Buffer buffer = rel_reader.read()) {
