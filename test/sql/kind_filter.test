@@ -26,7 +26,7 @@ SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relat
 ----
 13
 
-# kind IN (...) is not pushed down; falls back to DuckDB-side filtering
+# kind IN (...)
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'relation');
 ----
@@ -37,6 +37,39 @@ SELECT kind, count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN
 ----
 node	317
 relation	13
+
+# kind IN with three values
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'line', 'area');
+----
+698
+
+# kind OR (equivalent to kind IN)
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' OR kind = 'area';
+----
+394
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' OR kind = 'line';
+----
+621
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' OR kind = 'relation';
+----
+317
+
+# kind OR combined with tag predicate
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE (kind = 'node' OR kind = 'area') AND tags['name'] IS NOT NULL;
+----
+72
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE (kind = 'node' OR kind = 'line') AND tags['highway'] IS NOT NULL;
+----
+232
 
 # Closed ways without area=yes/no are emitted as both line and area
 
@@ -72,3 +105,9 @@ query TI
 SELECT kind, id FROM osmium_read('test/data/bainbridge.osm') WHERE id = 448047207 ORDER BY kind;
 ----
 line	448047207
+
+# impossible predicate (should match zero rows)
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND kind = 'area';
+----
+0

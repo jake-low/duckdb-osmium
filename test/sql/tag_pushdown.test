@@ -84,25 +84,64 @@ SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line'
 ----
 6
 
-# OR predicates (not pushed down, evaluated by DuckDB)
+# OR of tag predicates
 
+# OR of IS NOT NULL on different keys
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND (tags['highway'] IS NOT NULL OR tags['amenity'] IS NOT NULL);
 ----
 123
 
+# OR of equality on same key (equivalent to IN)
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND (tags['amenity'] = 'cafe' OR tags['amenity'] = 'restaurant');
 ----
 9
 
-# Mixed pushdown + non-pushdown predicates
+# OR of equality on different keys
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND (tags['highway'] = 'crossing' OR tags['amenity'] = 'cafe');
+----
+26
 
-# IS NOT NULL is pushed down; the OR is not. Both must be satisfied.
+# OR of IS NOT NULL on different keys (areas)
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND (tags['building'] IS NOT NULL OR tags['leisure'] IS NOT NULL);
+----
+50
+
+# OR of IN predicates on different keys (the benchmark query pattern)
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND (tags['building'] IN ('retail', 'commercial') OR tags['leisure'] IN ('park', 'garden'));
+----
+16
+
+# OR tag predicates combined with AND tag predicates
+
+# AND predicate + OR predicate (both must be satisfied)
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND tags['highway'] IS NOT NULL AND (tags['surface'] = 'asphalt' OR tags['surface'] = 'gravel');
 ----
 18
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND tags['building'] IS NOT NULL AND (tags['name'] IS NOT NULL OR tags['addr:housenumber'] IS NOT NULL);
+----
+18
+
+# OR tag predicates with geometry projected (exercises MP manager path)
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND (tags['building'] IS NOT NULL OR tags['leisure'] IS NOT NULL) AND geometry IS NOT NULL;
+----
+50
+
+# Combined: kind OR + tag OR (the exact benchmark query shape)
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE (kind = 'node' OR kind = 'area') AND (tags['building'] IS NOT NULL OR tags['leisure'] IS NOT NULL);
+----
+52
 
 # Negated predicates (not pushed down)
 

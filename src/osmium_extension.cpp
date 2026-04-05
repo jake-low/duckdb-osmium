@@ -11,6 +11,7 @@
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
@@ -86,9 +87,7 @@ static constexpr idx_t COL_REF_ROLES = 6;
 static constexpr idx_t COL_REF_TYPES = 7;
 static constexpr idx_t NUM_COLUMNS = 8;
 
-// Check whether an element's tags satisfy all pushed-down predicates.
-// DuckDB makes OR predicates opaque to us (and evaluates them as a
-// post-filter) so we only have to worry about AND semantics here.
+// Check whether an element's tags satisfy a single (non-conjunctive) predicate
 static bool MatchesTagPredicate(const osmium::TagList &tags, const TagPredicate &pred) {
 	const char *val = tags.get_value_by_key(pred.key.c_str());
 	if (!val) {
@@ -97,9 +96,21 @@ static bool MatchesTagPredicate(const osmium::TagList &tags, const TagPredicate 
 	return pred.values.empty() || pred.values.count(val);
 }
 
-static bool MatchesTagPredicates(const osmium::TagList &tags, const std::vector<TagPredicate> &predicates) {
-	for (const auto &pred : predicates) {
-		if (!MatchesTagPredicate(tags, pred)) {
+// Check whether an element's tags satisfy all pushed-down predicates.
+//
+// Predicates are stored in conjunctive normal form: the terms in the outer
+// vector are ANDed and the terms in each inner vectors are ORed. For example:
+// A AND (B OR C) -> [[A], [B, C]]
+static bool MatchesTagPredicates(const osmium::TagList &tags, const std::vector<std::vector<TagPredicate>> &groups) {
+	for (const auto &group : groups) {
+		bool any = false;
+		for (const auto &pred : group) {
+			if (MatchesTagPredicate(tags, pred)) {
+				any = true;
+				break;
+			}
+		}
+		if (!any) {
 			return false;
 		}
 	}
@@ -111,10 +122,10 @@ class RelationAreaManager
     : public osmium::relations::RelationsManager<RelationAreaManager<TAssembler>, false, true, false> {
 	using assembler_config_type = typename TAssembler::config_type;
 	assembler_config_type m_assembler_config;
-	std::vector<TagPredicate> m_predicates;
+	std::vector<std::vector<TagPredicate>> m_predicates;
 
 public:
-	explicit RelationAreaManager(assembler_config_type config, std::vector<TagPredicate> predicates = {})
+	explicit RelationAreaManager(assembler_config_type config, std::vector<std::vector<TagPredicate>> predicates = {})
 	    : m_assembler_config(std::move(config)), m_predicates(std::move(predicates)) {
 	}
 
@@ -264,7 +275,7 @@ static duckdb::shared_ptr<CachedNodeIndex> GetOrBuildNodeIndex(duckdb::ClientCon
 struct OsmBindData : public duckdb::TableFunctionData {
 	std::string file_path;
 	KindFilter kind_filter;
-	std::vector<TagPredicate> tag_predicates;
+	std::vector<std::vector<TagPredicate>> tag_predicates;
 
 	duckdb::unique_ptr<duckdb::FunctionData> Copy() const override {
 		auto copy = duckdb::make_uniq<OsmBindData>();
@@ -295,7 +306,7 @@ struct OsmGlobalState : public duckdb::GlobalTableFunctionState {
 	bool exhausted = false;
 
 	KindFilter kind_filter;
-	std::vector<TagPredicate> tag_predicates;
+	std::vector<std::vector<TagPredicate>> tag_predicates;
 
 	// Column mapping: schema column index -> output vector index (-1 if not projected)
 	int col_out[NUM_COLUMNS];
@@ -580,12 +591,27 @@ static idx_t ResolveSchemaColumn(const duckdb::LogicalGet &get, idx_t table_inde
 	return column_ids[proj_idx].GetPrimaryIndex();
 }
 
+// Try to set kind_filter bits from a kind string.
+static bool ApplyKindString(const std::string &kind_str, KindFilter &filter) {
+	if (kind_str == "node") {
+		filter.nodes = true;
+	} else if (kind_str == "line") {
+		filter.lines = true;
+	} else if (kind_str == "area") {
+		filter.areas = true;
+	} else if (kind_str == "relation") {
+		filter.relations = true;
+	} else {
+		return false;
+	}
+	return true;
+}
+
 // Try to extract a kind = 'literal' equality from a comparison expression.
-// Returns the kind string if found, empty string otherwise.
-static std::string TryExtractKindEquality(const duckdb::Expression &expr, const duckdb::LogicalGet &get,
-                                          idx_t table_index) {
+static bool TryExtractKindEquality(const duckdb::Expression &expr, const duckdb::LogicalGet &get, idx_t table_index,
+                                   KindFilter &filter) {
 	if (expr.GetExpressionType() != duckdb::ExpressionType::COMPARE_EQUAL) {
-		return "";
+		return false;
 	}
 	auto &comp = expr.Cast<duckdb::BoundComparisonExpression>();
 
@@ -603,19 +629,88 @@ static std::string TryExtractKindEquality(const duckdb::Expression &expr, const 
 	}
 
 	if (!col || !val) {
-		return "";
+		return false;
 	}
 
 	auto schema_idx = ResolveSchemaColumn(get, table_index, col->binding);
 	if (schema_idx != COL_KIND) {
-		return "";
+		return false;
 	}
 
 	if (val->value.type().id() != duckdb::LogicalTypeId::VARCHAR) {
-		return "";
+		return false;
 	}
 
-	return val->value.GetValue<std::string>();
+	KindFilter result {false, false, false, false};
+	if (!ApplyKindString(val->value.GetValue<std::string>(), result)) {
+		return false;
+	}
+	filter = result;
+	return true;
+}
+
+// Try to extract a kind IN ('node', 'area', ...) predicate.
+static bool TryExtractKindIn(const duckdb::Expression &expr, const duckdb::LogicalGet &get, idx_t table_index,
+                             KindFilter &filter) {
+	if (expr.GetExpressionType() != duckdb::ExpressionType::COMPARE_IN) {
+		return false;
+	}
+	auto &op = expr.Cast<duckdb::BoundOperatorExpression>();
+	if (op.children.size() < 2) {
+		return false;
+	}
+
+	// First child must be a column ref to the kind column
+	auto &first = *op.children[0];
+	if (first.GetExpressionClass() != duckdb::ExpressionClass::BOUND_COLUMN_REF) {
+		return false;
+	}
+	auto &col = first.Cast<duckdb::BoundColumnRefExpression>();
+	auto schema_idx = ResolveSchemaColumn(get, table_index, col.binding);
+	if (schema_idx != COL_KIND) {
+		return false;
+	}
+
+	KindFilter result {false, false, false, false};
+	for (idx_t i = 1; i < op.children.size(); i++) {
+		if (op.children[i]->GetExpressionClass() != duckdb::ExpressionClass::BOUND_CONSTANT) {
+			return false;
+		}
+		auto &c = op.children[i]->Cast<duckdb::BoundConstantExpression>();
+		if (c.value.type().id() != duckdb::LogicalTypeId::VARCHAR) {
+			return false;
+		}
+		if (!ApplyKindString(c.value.GetValue<std::string>(), result)) {
+			return false;
+		}
+	}
+
+	filter = result;
+	return true;
+}
+
+// Try to extract a CONJUNCTION_OR where every child is a kind = 'literal' equality.
+static bool TryExtractKindOr(const duckdb::Expression &expr, const duckdb::LogicalGet &get, idx_t table_index,
+                             KindFilter &filter) {
+	if (expr.GetExpressionType() != duckdb::ExpressionType::CONJUNCTION_OR) {
+		return false;
+	}
+	auto &conj = expr.Cast<duckdb::BoundConjunctionExpression>();
+
+	KindFilter result {false, false, false, false};
+	for (const auto &child : conj.children) {
+		KindFilter child_filter {false, false, false, false};
+		if (!TryExtractKindEquality(*child, get, table_index, child_filter)) {
+			return false;
+		}
+		result.nodes = result.nodes || child_filter.nodes;
+		result.lines = result.lines || child_filter.lines;
+		result.areas = result.areas || child_filter.areas;
+		result.relations = result.relations || child_filter.relations;
+	}
+
+	filter = result;
+	return true;
 }
 
 // Check if an expression is map_extract_value(column_ref(tags), constant_key).
@@ -743,6 +838,28 @@ static bool TryExtractTagPredicate(const duckdb::Expression &expr, const duckdb:
 	return false;
 }
 
+// Try to extract a CONJUNCTION_OR where every child is a tag predicate.
+// Returns the disjunctive group (for use as one element of the outer AND).
+static bool TryExtractTagPredicateOr(const duckdb::Expression &expr, const duckdb::LogicalGet &get, idx_t table_index,
+                                     std::vector<TagPredicate> &group) {
+	if (expr.GetExpressionType() != duckdb::ExpressionType::CONJUNCTION_OR) {
+		return false;
+	}
+	auto &conj = expr.Cast<duckdb::BoundConjunctionExpression>();
+
+	std::vector<TagPredicate> result;
+	for (const auto &child : conj.children) {
+		TagPredicate pred;
+		if (!TryExtractTagPredicate(*child, get, table_index, pred)) {
+			return false;
+		}
+		result.push_back(std::move(pred));
+	}
+
+	group = std::move(result);
+	return true;
+}
+
 static void OsmComplexFilterPushdown(duckdb::ClientContext &context, duckdb::LogicalGet &get,
                                      duckdb::FunctionData *bind_data_p,
                                      duckdb::vector<duckdb::unique_ptr<duckdb::Expression>> &filters) {
@@ -752,28 +869,46 @@ static void OsmComplexFilterPushdown(duckdb::ClientContext &context, duckdb::Log
 		bool consumed = false;
 
 		// Try kind = 'literal' pushdown
-		// TODO: handle kind IN ('foo', 'bar') predicates
-		auto kind_str = TryExtractKindEquality(*filters[i], get, get.table_index);
-		if (!kind_str.empty()) {
-			if (kind_str == "node") {
-				bind_data.kind_filter = {true, false, false, false};
-			} else if (kind_str == "line") {
-				bind_data.kind_filter = {false, true, false, false};
-			} else if (kind_str == "area") {
-				bind_data.kind_filter = {false, false, true, false};
-			} else if (kind_str == "relation") {
-				bind_data.kind_filter = {false, false, false, true};
+		{
+			KindFilter kf;
+			if (TryExtractKindEquality(*filters[i], get, get.table_index, kf)) {
+				bind_data.kind_filter = kf;
+				consumed = true;
 			}
-			consumed = true;
 		}
 
-		// TODO: handle predicates like kind IN ('node', 'area')
+		// Try kind IN ('node', 'area', ...) pushdown
+		if (!consumed) {
+			KindFilter kf;
+			if (TryExtractKindIn(*filters[i], get, get.table_index, kf)) {
+				bind_data.kind_filter = kf;
+				consumed = true;
+			}
+		}
 
-		// Try tag predicate pushdown
+		// Try kind = 'x' OR kind = 'y' pushdown
+		if (!consumed) {
+			KindFilter kf;
+			if (TryExtractKindOr(*filters[i], get, get.table_index, kf)) {
+				bind_data.kind_filter = kf;
+				consumed = true;
+			}
+		}
+
+		// Try single tag predicate pushdown (becomes a group of size 1)
 		if (!consumed) {
 			TagPredicate pred;
 			if (TryExtractTagPredicate(*filters[i], get, get.table_index, pred)) {
-				bind_data.tag_predicates.push_back(std::move(pred));
+				bind_data.tag_predicates.push_back({std::move(pred)});
+				consumed = true;
+			}
+		}
+
+		// Try OR of tag predicates pushdown (becomes a disjunctive group)
+		if (!consumed) {
+			std::vector<TagPredicate> group;
+			if (TryExtractTagPredicateOr(*filters[i], get, get.table_index, group)) {
+				bind_data.tag_predicates.push_back(std::move(group));
 				consumed = true;
 			}
 		}
