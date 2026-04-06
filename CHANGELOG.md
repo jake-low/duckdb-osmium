@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.0
+
+Released 2026-04-05.
+
+- Added pushdown for `OR` conjunctions. This means `WHERE` clauses like
+  `tags['foo'] == 'bar' OR tags['baz'] IS NOT NULL` and similar can be
+  executed efficiently.
+
 ## v0.2.0
 
 Released 2026-04-02.
