@@ -6,6 +6,16 @@ DuckDB's first-party [`spatial` extension](https://duckdb.org/docs/stable/core_e
 
 This extension supports predicate pushdown (so elements that don't match the WHERE clause won't be processed) and projection pushdown (so that if you don't SELECT the geometry column in your query, geometry construction is skipped internally).
 
+## Installation
+
+Run this in a DuckDB shell to install the extension:
+
+```
+INSTALL osmium FROM community;
+```
+
+This downloads the compiled extension from the [DuckDB Community Extensions](https://duckdb.org/community_extensions/) repository.
+
 ## Examples
 
 Get the OSM IDs, names, and Point geometries of all `place=city` nodes:
@@ -63,12 +73,6 @@ This extension does not have any opinion on which tags imply features are lines 
 - `relation`: other Relation types; they have NULL geometry
 
 It's important to understand that closed ways which are not tagged `area=yes` or `area=no` are fundamentally ambiguous; the correct interpretation has to be guessed based on the way's other tags. **This extension will emit these ways twice**, once with `kind = 'line'` and a LineString geometry, and once as `kind = 'area'` and a Polygon geometry. It's up to you to filter the results with a WHERE clause to get the interpretation you want.
-
-## Installation
-
-Right now, the best way to install this extension is to go to the "Actions" tab, go to the most recent run, scroll down to "Artifacts" (all the way to the bottom) and download the appropriate version for your OS and CPU architecture. Then launch duckdb with `duckdb --unsigned` (which enables loading of unsigned extensions) and then `LOAD '/path/to/osmium.duckdb_extension';` (or place the extension in `~/.duckdb/extensions/$version/$arch/` so you can load it by name as `LOAD osmium;`).
-
-I plan to submit this extension to DuckDB's [Community Extensions](https://github.com/duckdb/community-extensions) list soon, which would make it easier to install (`INSTALL osmium FROM community;`) but haven't done so yet.
 
 ## License
 
