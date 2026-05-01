@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.0
+
+Released 2026-05-01.
+
+- Ensure that output polygons always follow OGC winding order (CCW exterior rings).
+  Previously, polygons derived from closed ways would follow whatever direction
+  they were drawn in the raw OSM data.
+
 ## v0.3.1
 
 Released 2026-04-20.
