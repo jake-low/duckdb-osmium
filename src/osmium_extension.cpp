@@ -324,6 +324,22 @@ struct OsmGlobalState : public duckdb::GlobalTableFunctionState {
 	}
 };
 
+// Compute the signed area (in square degrees) of a closed way using the shoelace
+// formula. A positive area means the ring is wound counter-clockwise.
+static double SignedArea(const osmium::Way &way) {
+	double sum = 0.0;
+	const auto &nodes = way.nodes();
+	if (nodes.size() < 3) {
+		return 0.0;
+	}
+	for (auto it = nodes.cbegin(); std::next(it) != nodes.cend(); ++it) {
+		const auto a = it->location();
+		const auto b = std::next(it)->location();
+		sum += a.lon() * b.lat() - b.lon() * a.lat();
+	}
+	return 0.5 * sum;
+}
+
 static std::vector<std::pair<std::string, std::string>> ExtractTags(const osmium::TagList &tags) {
 	std::vector<std::pair<std::string, std::string>> result;
 	result.reserve(tags.size());
@@ -465,8 +481,13 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 					row.tags = ExtractTags(way.tags());
 				}
 				if (state.needs_geometry) {
+					// OSM ways do not have a guaranteed winding order, so check which
+					// direction the way's nodes are wound in and make sure that the
+					// resulting polygon has a CCW exterior ring (the OGC convention).
+					const auto dir =
+					    SignedArea(way) < 0.0 ? osmium::geom::direction::backward : osmium::geom::direction::forward;
 					try {
-						row.geometry = state.wkb_factory.create_polygon(way);
+						row.geometry = state.wkb_factory.create_polygon(way, osmium::geom::use_nodes::unique, dir);
 					} catch (const osmium::geometry_error &) {
 						continue;
 					}
