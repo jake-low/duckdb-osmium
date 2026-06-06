@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.1
+
+Released 2026-06-06.
+
+- Added support for DuckDB v1.5.3
+
 ## v0.4.0
 
 Released 2026-05-01.
