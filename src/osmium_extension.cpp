@@ -44,6 +44,7 @@ struct OsmRow {
 	OsmKind kind;
 	OsmType type;
 	int64_t id;
+	int64_t timestamp_seconds = 0; // 0 = no/invalid metadata -> SQL NULL
 	std::vector<std::pair<std::string, std::string>> tags;
 	std::string geometry; // WKB encoded
 	std::vector<int64_t> refs;
@@ -85,7 +86,8 @@ static constexpr idx_t COL_GEOMETRY = 4;
 static constexpr idx_t COL_REFS = 5;
 static constexpr idx_t COL_REF_ROLES = 6;
 static constexpr idx_t COL_REF_TYPES = 7;
-static constexpr idx_t NUM_COLUMNS = 8;
+static constexpr idx_t COL_TIMESTAMP = 8;
+static constexpr idx_t NUM_COLUMNS = 9;
 
 // Check whether an element's tags satisfy a single (non-conjunctive) predicate
 static bool MatchesTagPredicate(const osmium::TagList &tags, const TagPredicate &pred) {
@@ -312,6 +314,7 @@ struct OsmGlobalState : public duckdb::GlobalTableFunctionState {
 	int col_out[NUM_COLUMNS];
 	bool needs_geometry = false;
 	bool needs_tags = false;
+	bool needs_timestamp = false;
 
 	OsmGlobalState() {
 		for (idx_t i = 0; i < NUM_COLUMNS; i++) {
@@ -349,6 +352,15 @@ static std::vector<std::pair<std::string, std::string>> ExtractTags(const osmium
 	return result;
 }
 
+// Record an element's last-edited time (UTC seconds since the epoch). OSM files
+// can omit metadata; an invalid timestamp is left as 0 and surfaced as SQL NULL.
+static void SetTimestamp(OsmRow &row, const osmium::OSMObject &object) {
+	const auto ts = object.timestamp();
+	if (ts.valid()) {
+		row.timestamp_seconds = ts.seconds_since_epoch();
+	}
+}
+
 // Process one osmium buffer: iterate matching elements and append rows
 // to state.current_batch. If the MP manager is active, also feeds ways
 // to the assembler (which may produce multipolygon area rows via callback).
@@ -380,6 +392,9 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 				row.kind = KIND_AREA;
 				row.type = TYPE_RELATION;
 				row.id = area.orig_id();
+				if (state.needs_timestamp) {
+					SetTimestamp(row, area);
+				}
 				if (state.needs_tags) {
 					row.tags = ExtractTags(area.tags());
 				}
@@ -410,6 +425,9 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 			row.kind = KIND_NODE;
 			row.type = TYPE_NODE;
 			row.id = node.id();
+			if (state.needs_timestamp) {
+				SetTimestamp(row, node);
+			}
 			if (state.needs_tags) {
 				row.tags = ExtractTags(node.tags());
 			}
@@ -461,6 +479,9 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 				row.kind = KIND_LINE;
 				row.type = TYPE_WAY;
 				row.id = way.id();
+				if (state.needs_timestamp) {
+					SetTimestamp(row, way);
+				}
 				if (state.needs_tags) {
 					row.tags = ExtractTags(way.tags());
 				}
@@ -481,6 +502,9 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 				row.kind = KIND_AREA;
 				row.type = TYPE_WAY;
 				row.id = way.id();
+				if (state.needs_timestamp) {
+					SetTimestamp(row, way);
+				}
 				if (state.needs_tags) {
 					row.tags = ExtractTags(way.tags());
 				}
@@ -523,6 +547,9 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 				row.kind = KIND_AREA;
 				row.type = TYPE_RELATION;
 				row.id = relation.id();
+				if (state.needs_timestamp) {
+					SetTimestamp(row, relation);
+				}
 				if (state.needs_tags) {
 					row.tags = ExtractTags(relation.tags());
 				}
@@ -541,6 +568,9 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 			row.kind = KIND_RELATION;
 			row.type = TYPE_RELATION;
 			row.id = relation.id();
+			if (state.needs_timestamp) {
+				SetTimestamp(row, relation);
+			}
 			if (state.needs_tags) {
 				row.tags = ExtractTags(relation.tags());
 			}
@@ -599,6 +629,9 @@ static duckdb::unique_ptr<duckdb::FunctionData> OsmBind(duckdb::ClientContext &c
 
 	names.emplace_back("ref_types");
 	return_types.emplace_back(duckdb::LogicalType::LIST(duckdb::LogicalType::VARCHAR));
+
+	names.emplace_back("timestamp");
+	return_types.emplace_back(duckdb::LogicalType::TIMESTAMP_TZ);
 
 	return bind_data;
 }
@@ -970,6 +1003,7 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 	}
 	state->needs_geometry = state->col_out[COL_GEOMETRY] >= 0;
 	state->needs_tags = state->col_out[COL_TAGS] >= 0;
+	state->needs_timestamp = state->col_out[COL_TIMESTAMP] >= 0;
 
 	// Build or retrieve cached node location index if needed.
 	bool needs_node_index = state->needs_geometry && bind_data.kind_filter.NeedsNodeIndex();
@@ -1036,6 +1070,7 @@ static void OsmScan(duckdb::ClientContext &context, duckdb::TableFunctionInput &
 	int refs_out = state.col_out[COL_REFS];
 	int roles_out = state.col_out[COL_REF_ROLES];
 	int types_out = state.col_out[COL_REF_TYPES];
+	int ts_out = state.col_out[COL_TIMESTAMP];
 
 	idx_t tags_offset = 0;
 	idx_t refs_offset = 0;
@@ -1081,6 +1116,16 @@ static void OsmScan(duckdb::ClientContext &context, duckdb::TableFunctionInput &
 
 			if (id_out >= 0) {
 				duckdb::FlatVector::GetData<int64_t>(output.data[id_out])[count] = row.id;
+			}
+
+			if (ts_out >= 0) {
+				auto &vec = output.data[ts_out];
+				if (row.timestamp_seconds == 0) {
+					duckdb::FlatVector::SetNull(vec, count, true);
+				} else {
+					duckdb::FlatVector::GetData<duckdb::timestamp_t>(vec)[count] =
+					    duckdb::timestamp_t(row.timestamp_seconds * 1000000LL);
+				}
 			}
 
 			if (tags_out >= 0) {
