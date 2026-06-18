@@ -1,0 +1,60 @@
+# name: test/sql/timestamp.test
+# description: the timestamp column exposes each element's last-edited time (UTC)
+# group: [sql]
+
+require osmium
+
+# The column is a UTC instant. Comparing against a TIMESTAMPTZ literal is
+# timezone-independent, so these assertions hold regardless of session TimeZone.
+
+# Type is TIMESTAMP WITH TIME ZONE
+query T
+SELECT DISTINCT typeof(timestamp) FROM osmium_read('test/data/bainbridge.osm');
+----
+TIMESTAMP WITH TIME ZONE
+
+# Node
+query I
+SELECT timestamp = TIMESTAMPTZ '2025-04-17 22:52:40+00'
+FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND id = 609981906;
+----
+true
+
+# Way emitted as a line
+query I
+SELECT timestamp = TIMESTAMPTZ '2022-09-08 08:26:46+00'
+FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND id = 5913873;
+----
+true
+
+# Relation
+query I
+SELECT timestamp = TIMESTAMPTZ '2026-01-31 06:44:42+00'
+FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' AND id = 1626887;
+----
+true
+
+# Elements without metadata yield NULL. Way 1456812001 (a closed area=yes
+# pedestrian way) has no timestamp attribute in the fixture.
+query I
+SELECT timestamp IS NULL
+FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND type = 'way' AND id = 1456812001;
+----
+true
+
+# Projecting only the timestamp column works (projection pushdown path).
+query I
+SELECT count(*) FROM (
+  SELECT timestamp FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node'
+);
+----
+317
+
+# timestamp can be selected alongside other columns and ordered. (Compared
+# against a literal rather than displayed, so the result is TimeZone-independent.)
+query II
+SELECT id, timestamp = TIMESTAMPTZ '2025-04-17 22:52:40+00'
+FROM osmium_read('test/data/bainbridge.osm')
+WHERE kind = 'node' AND tags['name'] IS NOT NULL ORDER BY id LIMIT 1;
+----
+609981906	true
