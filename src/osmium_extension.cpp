@@ -388,6 +388,8 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 						row.geometry = state.wkb_factory.create_multipolygon(area);
 					} catch (const osmium::geometry_error &) {
 						continue;
+					} catch (const osmium::invalid_location &) {
+						continue;
 					}
 				}
 				batch.push_back(std::move(row));
@@ -467,6 +469,8 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 						row.geometry = state.wkb_factory.create_linestring(way);
 					} catch (const osmium::geometry_error &) {
 						continue;
+					} catch (const osmium::invalid_location &) {
+						continue;
 					}
 				}
 				batch.push_back(std::move(row));
@@ -484,11 +488,13 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 					// OSM ways do not have a guaranteed winding order, so check which
 					// direction the way's nodes are wound in and make sure that the
 					// resulting polygon has a CCW exterior ring (the OGC convention).
-					const auto dir =
-					    SignedArea(way) < 0.0 ? osmium::geom::direction::backward : osmium::geom::direction::forward;
 					try {
+						const auto dir = SignedArea(way) < 0.0 ? osmium::geom::direction::backward
+						                                       : osmium::geom::direction::forward;
 						row.geometry = state.wkb_factory.create_polygon(way, osmium::geom::use_nodes::unique, dir);
 					} catch (const osmium::geometry_error &) {
+						continue;
+					} catch (const osmium::invalid_location &) {
 						continue;
 					}
 				}
