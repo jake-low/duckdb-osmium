@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.2
+
+Released 2026-07-09.
+
+- Added support for DuckDB v1.5.4
+- Fixed line and area handling to skip elements with incomplete geometries
+  (rather than aborting the query when they are encountered)
+
 ## v0.4.1
 
 Released 2026-06-06.
