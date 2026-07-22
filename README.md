@@ -62,6 +62,26 @@ GROUP BY surface
 ORDER BY total_length_m DESC;
 ```
 
+## Schema
+
+The following columns are available:
+
+- `kind` - the constructed type; one of `node`, `line`, `area`, or `relation` (see next section)
+- `type` - the original OSM type; one of `node`, `way`, or `relation`
+- `id` - the OSM ID (unique among elements of the same type; for a globally unique key you want `(type, id)`)
+- `tags` - the element's tags, as a `MAP(VARCHAR, VARCHAR)`
+- `geometry` - the constructed geometry; a Point, LineString, Polygon, or MultiPolygon depending on `kind` (NULL for `relation` rows)
+- `version` - the element's version number, which OSM increments each time it is modified (`UINTEGER`)
+- `timestamp` - the time of the element's last edit, as a `TIMESTAMP WITH TIME ZONE` in UTC
+- `changeset` - the ID of the changeset the element was last edited in (`UINTEGER`)
+- `uid` - the numeric ID of the user who last edited the element (`UINTEGER`)
+- `username` - the display name of the user who last edited the element (`VARCHAR`)
+- `refs` - for `relation` rows, the member element IDs as a `BIGINT[]` (NULL for other kinds)
+- `ref_roles` - for `relation` rows, the member roles as a `VARCHAR[]`, aligned with `refs` (NULL for other kinds)
+- `ref_types` - for `relation` rows, the member types as a `VARCHAR[]` (each `node`, `way`, or `relation`), aligned with `refs` (NULL for other kinds)
+
+The `version`, `timestamp`, `changeset`, `uid`, and `username` columns come from OSM element metadata, which is optional: files can be written without it, and individual fields can be absent (for example, edits with redacted authorship carry no `uid` or `username`). Any absent field is returned as NULL.
+
 ## Disambiguating lines and areas
 
 Closed ways in OSM can represent either lines or polygons. Which interpretation is indended is implied by the element's tags. For example, a closed way with `highway=roundabout` represents a LineString; one with `building=house` represents a Polygon.
