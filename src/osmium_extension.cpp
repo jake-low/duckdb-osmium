@@ -44,7 +44,14 @@ struct OsmRow {
 	OsmKind kind;
 	OsmType type;
 	int64_t id;
-	int64_t timestamp_seconds = 0; // 0 = no/invalid metadata -> SQL NULL
+	// OSM element metadata. Files can omit metadata, and individual fields can be
+	// absent (e.g. anonymized PBF files carry no uid or username). Each field's
+	// zero/empty value is surfaced as SQL NULL.
+	uint32_t version = 0;
+	int64_t timestamp_seconds = 0;
+	uint32_t changeset = 0;
+	uint32_t uid = 0;
+	std::string username;
 	std::vector<std::pair<std::string, std::string>> tags;
 	std::string geometry; // WKB encoded
 	std::vector<int64_t> refs;
@@ -83,11 +90,15 @@ static constexpr idx_t COL_TYPE = 1;
 static constexpr idx_t COL_ID = 2;
 static constexpr idx_t COL_TAGS = 3;
 static constexpr idx_t COL_GEOMETRY = 4;
-static constexpr idx_t COL_REFS = 5;
-static constexpr idx_t COL_REF_ROLES = 6;
-static constexpr idx_t COL_REF_TYPES = 7;
-static constexpr idx_t COL_TIMESTAMP = 8;
-static constexpr idx_t NUM_COLUMNS = 9;
+static constexpr idx_t COL_VERSION = 5;
+static constexpr idx_t COL_TIMESTAMP = 6;
+static constexpr idx_t COL_CHANGESET = 7;
+static constexpr idx_t COL_UID = 8;
+static constexpr idx_t COL_USERNAME = 9;
+static constexpr idx_t COL_REFS = 10;
+static constexpr idx_t COL_REF_ROLES = 11;
+static constexpr idx_t COL_REF_TYPES = 12;
+static constexpr idx_t NUM_COLUMNS = 13;
 
 // Check whether an element's tags satisfy a single (non-conjunctive) predicate
 static bool MatchesTagPredicate(const osmium::TagList &tags, const TagPredicate &pred) {
@@ -312,9 +323,11 @@ struct OsmGlobalState : public duckdb::GlobalTableFunctionState {
 
 	// Column mapping: schema column index -> output vector index (-1 if not projected)
 	int col_out[NUM_COLUMNS];
+
 	bool needs_geometry = false;
 	bool needs_tags = false;
-	bool needs_timestamp = false;
+	bool needs_metadata = false; // are any of the metadata columns projected?
+	bool needs_username = false; // username specifically (since copying it requires an allocation)
 
 	OsmGlobalState() {
 		for (idx_t i = 0; i < NUM_COLUMNS; i++) {
@@ -352,12 +365,20 @@ static std::vector<std::pair<std::string, std::string>> ExtractTags(const osmium
 	return result;
 }
 
-// Record an element's last-edited time (UTC seconds since the epoch). OSM files
-// can omit metadata; an invalid timestamp is left as 0 and surfaced as SQL NULL.
-static void SetTimestamp(OsmRow &row, const osmium::OSMObject &object) {
+// Copy an element's metadata (version, timestamp, changeset, uid, username) onto
+// the row. The username copy is gated separately because it is the only field that
+// allocates; the scalar fields are cheap enough to always populate when any metadata
+// column is projected.
+static void SetMetadata(OsmRow &row, const osmium::OSMObject &object, bool needs_username) {
+	row.version = object.version();
 	const auto ts = object.timestamp();
 	if (ts.valid()) {
 		row.timestamp_seconds = ts.seconds_since_epoch();
+	}
+	row.changeset = object.changeset();
+	row.uid = object.uid();
+	if (needs_username) {
+		row.username = object.user();
 	}
 }
 
@@ -392,8 +413,8 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 				row.kind = KIND_AREA;
 				row.type = TYPE_RELATION;
 				row.id = area.orig_id();
-				if (state.needs_timestamp) {
-					SetTimestamp(row, area);
+				if (state.needs_metadata) {
+					SetMetadata(row, area, state.needs_username);
 				}
 				if (state.needs_tags) {
 					row.tags = ExtractTags(area.tags());
@@ -425,8 +446,8 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 			row.kind = KIND_NODE;
 			row.type = TYPE_NODE;
 			row.id = node.id();
-			if (state.needs_timestamp) {
-				SetTimestamp(row, node);
+			if (state.needs_metadata) {
+				SetMetadata(row, node, state.needs_username);
 			}
 			if (state.needs_tags) {
 				row.tags = ExtractTags(node.tags());
@@ -479,8 +500,8 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 				row.kind = KIND_LINE;
 				row.type = TYPE_WAY;
 				row.id = way.id();
-				if (state.needs_timestamp) {
-					SetTimestamp(row, way);
+				if (state.needs_metadata) {
+					SetMetadata(row, way, state.needs_username);
 				}
 				if (state.needs_tags) {
 					row.tags = ExtractTags(way.tags());
@@ -502,8 +523,8 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 				row.kind = KIND_AREA;
 				row.type = TYPE_WAY;
 				row.id = way.id();
-				if (state.needs_timestamp) {
-					SetTimestamp(row, way);
+				if (state.needs_metadata) {
+					SetMetadata(row, way, state.needs_username);
 				}
 				if (state.needs_tags) {
 					row.tags = ExtractTags(way.tags());
@@ -547,8 +568,8 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 				row.kind = KIND_AREA;
 				row.type = TYPE_RELATION;
 				row.id = relation.id();
-				if (state.needs_timestamp) {
-					SetTimestamp(row, relation);
+				if (state.needs_metadata) {
+					SetMetadata(row, relation, state.needs_username);
 				}
 				if (state.needs_tags) {
 					row.tags = ExtractTags(relation.tags());
@@ -568,8 +589,8 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 			row.kind = KIND_RELATION;
 			row.type = TYPE_RELATION;
 			row.id = relation.id();
-			if (state.needs_timestamp) {
-				SetTimestamp(row, relation);
+			if (state.needs_metadata) {
+				SetMetadata(row, relation, state.needs_username);
 			}
 			if (state.needs_tags) {
 				row.tags = ExtractTags(relation.tags());
@@ -621,6 +642,21 @@ static duckdb::unique_ptr<duckdb::FunctionData> OsmBind(duckdb::ClientContext &c
 	names.emplace_back("geometry");
 	return_types.emplace_back(duckdb::LogicalType::GEOMETRY());
 
+	names.emplace_back("version");
+	return_types.emplace_back(duckdb::LogicalType::UINTEGER);
+
+	names.emplace_back("timestamp");
+	return_types.emplace_back(duckdb::LogicalType::TIMESTAMP_TZ);
+
+	names.emplace_back("changeset");
+	return_types.emplace_back(duckdb::LogicalType::UINTEGER);
+
+	names.emplace_back("uid");
+	return_types.emplace_back(duckdb::LogicalType::UINTEGER);
+
+	names.emplace_back("username");
+	return_types.emplace_back(duckdb::LogicalType::VARCHAR);
+
 	names.emplace_back("refs");
 	return_types.emplace_back(duckdb::LogicalType::LIST(duckdb::LogicalType::BIGINT));
 
@@ -629,9 +665,6 @@ static duckdb::unique_ptr<duckdb::FunctionData> OsmBind(duckdb::ClientContext &c
 
 	names.emplace_back("ref_types");
 	return_types.emplace_back(duckdb::LogicalType::LIST(duckdb::LogicalType::VARCHAR));
-
-	names.emplace_back("timestamp");
-	return_types.emplace_back(duckdb::LogicalType::TIMESTAMP_TZ);
 
 	return bind_data;
 }
@@ -1003,7 +1036,10 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 	}
 	state->needs_geometry = state->col_out[COL_GEOMETRY] >= 0;
 	state->needs_tags = state->col_out[COL_TAGS] >= 0;
-	state->needs_timestamp = state->col_out[COL_TIMESTAMP] >= 0;
+	state->needs_username = state->col_out[COL_USERNAME] >= 0;
+	state->needs_metadata = state->needs_username || state->col_out[COL_VERSION] >= 0 ||
+	                        state->col_out[COL_TIMESTAMP] >= 0 || state->col_out[COL_CHANGESET] >= 0 ||
+	                        state->col_out[COL_UID] >= 0;
 
 	// Build or retrieve cached node location index if needed.
 	bool needs_node_index = state->needs_geometry && bind_data.kind_filter.NeedsNodeIndex();
@@ -1070,7 +1106,11 @@ static void OsmScan(duckdb::ClientContext &context, duckdb::TableFunctionInput &
 	int refs_out = state.col_out[COL_REFS];
 	int roles_out = state.col_out[COL_REF_ROLES];
 	int types_out = state.col_out[COL_REF_TYPES];
+	int version_out = state.col_out[COL_VERSION];
 	int ts_out = state.col_out[COL_TIMESTAMP];
+	int changeset_out = state.col_out[COL_CHANGESET];
+	int uid_out = state.col_out[COL_UID];
+	int username_out = state.col_out[COL_USERNAME];
 
 	idx_t tags_offset = 0;
 	idx_t refs_offset = 0;
@@ -1118,16 +1158,6 @@ static void OsmScan(duckdb::ClientContext &context, duckdb::TableFunctionInput &
 				duckdb::FlatVector::GetData<int64_t>(output.data[id_out])[count] = row.id;
 			}
 
-			if (ts_out >= 0) {
-				auto &vec = output.data[ts_out];
-				if (row.timestamp_seconds == 0) {
-					duckdb::FlatVector::SetNull(vec, count, true);
-				} else {
-					duckdb::FlatVector::GetData<duckdb::timestamp_t>(vec)[count] =
-					    duckdb::timestamp_t(row.timestamp_seconds * 1000000LL);
-				}
-			}
-
 			if (tags_out >= 0) {
 				auto &tags_vec = output.data[tags_out];
 				auto &tags_keys = duckdb::MapVector::GetKeys(tags_vec);
@@ -1157,6 +1187,53 @@ static void OsmScan(duckdb::ClientContext &context, duckdb::TableFunctionInput &
 					duckdb::string_t geom;
 					duckdb::Geometry::FromBinary(wkb, geom, vec, true);
 					duckdb::FlatVector::GetData<duckdb::string_t>(vec)[count] = geom;
+				}
+			}
+
+			if (version_out >= 0) {
+				auto &vec = output.data[version_out];
+				if (row.version == 0) {
+					duckdb::FlatVector::SetNull(vec, count, true);
+				} else {
+					duckdb::FlatVector::GetData<uint32_t>(vec)[count] = row.version;
+				}
+			}
+
+			if (ts_out >= 0) {
+				auto &vec = output.data[ts_out];
+				if (row.timestamp_seconds == 0) {
+					duckdb::FlatVector::SetNull(vec, count, true);
+				} else {
+					duckdb::FlatVector::GetData<duckdb::timestamp_t>(vec)[count] =
+					    duckdb::timestamp_t(row.timestamp_seconds * 1000000LL);
+				}
+			}
+
+			if (changeset_out >= 0) {
+				auto &vec = output.data[changeset_out];
+				if (row.changeset == 0) {
+					duckdb::FlatVector::SetNull(vec, count, true);
+				} else {
+					duckdb::FlatVector::GetData<uint32_t>(vec)[count] = row.changeset;
+				}
+			}
+
+			if (uid_out >= 0) {
+				auto &vec = output.data[uid_out];
+				if (row.uid == 0) {
+					duckdb::FlatVector::SetNull(vec, count, true);
+				} else {
+					duckdb::FlatVector::GetData<uint32_t>(vec)[count] = row.uid;
+				}
+			}
+
+			if (username_out >= 0) {
+				auto &vec = output.data[username_out];
+				if (row.username.empty()) {
+					duckdb::FlatVector::SetNull(vec, count, true);
+				} else {
+					duckdb::FlatVector::GetData<duckdb::string_t>(vec)[count] =
+					    duckdb::StringVector::AddString(vec, row.username);
 				}
 			}
 

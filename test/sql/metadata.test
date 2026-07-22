@@ -1,0 +1,50 @@
+# name: test/sql/metadata.test
+# description: the version, changeset, uid and username columns expose OSM element metadata
+# group: [sql]
+
+require osmium
+
+# Types: version, changeset and uid mirror libosmium's uint32_t fields; username is text.
+query TTTT
+SELECT DISTINCT typeof(version), typeof(changeset), typeof(uid), typeof(username)
+FROM osmium_read('test/data/bainbridge.osm');
+----
+UINTEGER	UINTEGER	UINTEGER	VARCHAR
+
+# Node
+query IIIT
+SELECT version, changeset, uid, username
+FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND id = 609981906;
+----
+8	165091216	215259	groundhogdaytea
+
+# Way
+query IIIT
+SELECT version, changeset, uid, username
+FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND id = 5913873;
+----
+15	125931932	12717816	flaviusm_telenav
+
+# Relation
+query IIIT
+SELECT version, changeset, uid, username
+FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' AND id = 1626887;
+----
+28	177915349	18290369	tobych
+
+# Elements without metadata yield NULL in every metadata column. Way 1456812001
+# (a closed area=yes pedestrian way) has no metadata attributes in the fixture.
+query I
+SELECT version IS NULL AND changeset IS NULL AND uid IS NULL AND username IS NULL
+FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND type = 'way' AND id = 1456812001;
+----
+true
+
+# Projecting only a metadata column works (projection pushdown path); the
+# username string is only materialized when that column is requested.
+query I
+SELECT count(*) FROM (
+  SELECT username FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node'
+);
+----
+317
