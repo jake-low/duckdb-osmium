@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.5.0
+
+Released 2026-07-22.
+
+- Expose metadata columns (version, timestamp, changeset, uid, username) when they
+  are present in the OSM PBF file.
+- Emit NULL geometries for elements whose geometry can't be constructed. Previously,
+  these rows were silently skipped, leading to surprising results (like the fact that
+  SELECT count(id) and SELECT count(geometry) could return different row counts).
+
 ## v0.4.2
 
 Released 2026-07-09.
