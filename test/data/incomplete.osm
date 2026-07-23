@@ -1,0 +1,75 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!--
+  This fixture file contains synthetic data meant to exercise the code paths
+  that handle elements with unprocessable or incomplete geometry.
+
+  Contents, and expected results:
+
+    node 1        tagged node with a valid location            -> point
+    nodes 2,3     endpoints of a complete way
+    nodes 4-7     corners of a complete closed way
+    way 10        complete open way                            -> line (geometry)
+    way 11        open way referencing missing node 99         -> line (NULL geometry)
+    way 12        complete closed way, area=yes                -> area (geometry)
+    way 13        closed way, area=yes, missing node 98        -> area (NULL geometry)
+    relation 30   multipolygon whose member way 20 is missing  -> area (NULL geometry)
+    relation 31   boundary relation with no way members        -> area (NULL geometry)
+-->
+<osm version="0.6">
+  <node id="1" version="1" lat="47.600" lon="-122.500">
+    <tag k="place" v="locality"/>
+    <tag k="name" v="Testville"/>
+  </node>
+
+  <node id="2" version="1" lat="47.600" lon="-122.500"/>
+  <node id="3" version="1" lat="47.610" lon="-122.510"/>
+
+  <node id="4" version="1" lat="47.600" lon="-122.500"/>
+  <node id="5" version="1" lat="47.600" lon="-122.490"/>
+  <node id="6" version="1" lat="47.610" lon="-122.490"/>
+  <node id="7" version="1" lat="47.610" lon="-122.500"/>
+
+  <way id="10" version="1">
+    <nd ref="2"/>
+    <nd ref="3"/>
+    <tag k="highway" v="residential"/>
+  </way>
+
+  <way id="11" version="1">
+    <nd ref="2"/>
+    <nd ref="99"/>
+    <tag k="highway" v="residential"/>
+  </way>
+
+  <way id="12" version="1">
+    <nd ref="4"/>
+    <nd ref="5"/>
+    <nd ref="6"/>
+    <nd ref="7"/>
+    <nd ref="4"/>
+    <tag k="area" v="yes"/>
+    <tag k="building" v="yes"/>
+  </way>
+
+  <way id="13" version="1">
+    <nd ref="4"/>
+    <nd ref="5"/>
+    <nd ref="98"/>
+    <nd ref="7"/>
+    <nd ref="4"/>
+    <tag k="area" v="yes"/>
+    <tag k="building" v="yes"/>
+  </way>
+
+  <relation id="30" version="1">
+    <member type="way" ref="20" role="outer"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="building" v="yes"/>
+  </relation>
+
+  <relation id="31" version="1">
+    <member type="node" ref="1" role="admin_centre"/>
+    <tag k="type" v="boundary"/>
+    <tag k="boundary" v="administrative"/>
+  </relation>
+</osm>

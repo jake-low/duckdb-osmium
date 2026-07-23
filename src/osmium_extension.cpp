@@ -36,6 +36,7 @@
 #include <osmium/visitor.hpp>
 
 #include <cstring>
+#include <functional>
 
 enum OsmKind : uint8_t { KIND_NODE = 0, KIND_LINE = 1, KIND_AREA = 2, KIND_RELATION = 3 };
 enum OsmType : uint8_t { TYPE_NODE = 0, TYPE_WAY = 1, TYPE_RELATION = 2 };
@@ -142,6 +143,10 @@ public:
 	    : m_assembler_config(std::move(config)), m_predicates(std::move(predicates)) {
 	}
 
+	// Called with a relation the assembler failed to build geometry for, so the
+	// caller can still emit a row (with NULL geometry) for that relation.
+	std::function<void(const osmium::Relation &)> failed_relation_callback;
+
 	bool new_relation(const osmium::Relation &relation) const {
 		const char *type = relation.tags().get_value_by_key("type");
 		if (!type) {
@@ -150,12 +155,7 @@ public:
 		if (std::strcmp(type, "multipolygon") != 0 && std::strcmp(type, "boundary") != 0) {
 			return false;
 		}
-		if (!MatchesTagPredicates(relation.tags(), m_predicates)) {
-			return false;
-		}
-		return std::any_of(
-		    relation.members().cbegin(), relation.members().cend(),
-		    [](const osmium::RelationMember &member) { return member.type() == osmium::item_type::way; });
+		return MatchesTagPredicates(relation.tags(), m_predicates);
 	}
 
 	void complete_relation(const osmium::Relation &relation) {
@@ -167,10 +167,15 @@ public:
 			}
 		}
 
+		bool assembled = false;
 		try {
 			TAssembler assembler {m_assembler_config};
-			assembler(relation, ways, this->buffer());
+			assembled = assembler(relation, ways, this->buffer());
 		} catch (const osmium::invalid_location &) {
+			// assembled stays false; handled below by emitting a NULL-geometry row
+		}
+		if (!assembled && failed_relation_callback) {
+			failed_relation_callback(relation);
 		}
 	}
 
@@ -382,6 +387,23 @@ static void SetMetadata(OsmRow &row, const osmium::OSMObject &object, bool needs
 	}
 }
 
+// Build an area row (kind=area, type=relation) for a relation, leaving geometry
+// NULL. Used when a multipolygon/boundary relation matches the query but its
+// geometry can't be assembled (e.g. member ways missing from the file).
+static OsmRow MakeRelationAreaRow(const OsmGlobalState &state, const osmium::Relation &relation) {
+	OsmRow row;
+	row.kind = KIND_AREA;
+	row.type = TYPE_RELATION;
+	row.id = relation.id();
+	if (state.needs_metadata) {
+		SetMetadata(row, relation, state.needs_username);
+	}
+	if (state.needs_tags) {
+		row.tags = ExtractTags(relation.tags());
+	}
+	return row;
+}
+
 // Process one osmium buffer: iterate matching elements and append rows
 // to state.current_batch. If the MP manager is active, also feeds ways
 // to the assembler (which may produce multipolygon area rows via callback).
@@ -394,6 +416,9 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 	// and feed the buffer to the manager. Assembled multipolygon areas
 	// are pushed to current_batch by the callback.
 	if (state.mp_manager) {
+		state.mp_manager->failed_relation_callback = [&state, &batch](const osmium::Relation &relation) {
+			batch.push_back(MakeRelationAreaRow(state, relation));
+		};
 		MemberWayLocationResolver resolver {*state.cached_index->index, state.mp_member_way_ids};
 		auto &mp_handler = state.mp_manager->handler([&state, &batch](osmium::memory::Buffer &&area_buffer) {
 			for (const auto &area : area_buffer.select<osmium::Area>()) {
@@ -423,9 +448,9 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 					try {
 						row.geometry = state.wkb_factory.create_multipolygon(area);
 					} catch (const osmium::geometry_error &) {
-						continue;
+						// leave geometry NULL; emit the row anyway
 					} catch (const osmium::invalid_location &) {
-						continue;
+						// leave geometry NULL; emit the row anyway
 					}
 				}
 				batch.push_back(std::move(row));
@@ -456,7 +481,7 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 				try {
 					row.geometry = state.wkb_factory.create_point(node);
 				} catch (const osmium::invalid_location &) {
-					continue;
+					// leave geometry NULL; emit the row anyway
 				}
 			}
 			batch.push_back(std::move(row));
@@ -510,9 +535,9 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 					try {
 						row.geometry = state.wkb_factory.create_linestring(way);
 					} catch (const osmium::geometry_error &) {
-						continue;
+						// leave geometry NULL; emit the row anyway
 					} catch (const osmium::invalid_location &) {
-						continue;
+						// leave geometry NULL; emit the row anyway
 					}
 				}
 				batch.push_back(std::move(row));
@@ -538,9 +563,9 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 						                                       : osmium::geom::direction::forward;
 						row.geometry = state.wkb_factory.create_polygon(way, osmium::geom::use_nodes::unique, dir);
 					} catch (const osmium::geometry_error &) {
-						continue;
+						// leave geometry NULL; emit the row anyway
 					} catch (const osmium::invalid_location &) {
-						continue;
+						// leave geometry NULL; emit the row anyway
 					}
 				}
 				batch.push_back(std::move(row));
@@ -1093,7 +1118,7 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 static void OsmScan(duckdb::ClientContext &context, duckdb::TableFunctionInput &data, duckdb::DataChunk &output) {
 	auto &state = data.global_state->Cast<OsmGlobalState>();
 
-	if (state.exhausted) {
+	if (state.exhausted && state.batch_offset >= state.current_batch.size()) {
 		output.SetCardinality(0);
 		return;
 	}
@@ -1122,20 +1147,35 @@ static void OsmScan(duckdb::ClientContext &context, duckdb::TableFunctionInput &
 
 	while (count < capacity) {
 		if (state.batch_offset >= state.current_batch.size()) {
-			// current batch is empty so read another one
+			// current batch is consumed so produce another one
 			state.current_batch.clear();
 			state.batch_offset = 0;
+
+			if (state.exhausted) {
+				break;
+			}
 
 			osmium::memory::Buffer buffer = state.reader->read();
 			if (!buffer) {
 				state.reader->close();
 				state.exhausted = true;
-				break;
-			}
-			ProcessBuffer(state, buffer);
-
-			if (state.current_batch.empty()) {
-				continue;
+				// Emit NULL-geometry area rows for multipolygon/boundary relations
+				// that were never assembled, either because member ways were missing
+				// from the file or because the relation had no way members at all.
+				if (state.mp_manager) {
+					state.mp_manager->for_each_incomplete_relation(
+					    [&state](const osmium::relations::RelationHandle &handle) {
+						    state.current_batch.push_back(MakeRelationAreaRow(state, *handle));
+					    });
+				}
+				if (state.current_batch.empty()) {
+					break;
+				}
+			} else {
+				ProcessBuffer(state, buffer);
+				if (state.current_batch.empty()) {
+					continue;
+				}
 			}
 		}
 

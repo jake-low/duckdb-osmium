@@ -1,0 +1,39 @@
+# name: test/sql/incomplete.test
+# description: elements whose geometry cannot be built are emitted with NULL geometry
+# group: [sql]
+
+require osmium
+
+# Lines that can't be built are returned with NULL geometry:
+#   10  refers to a missing node (not found in the file)
+#   11  a complete line (so geometry is returned)
+query II
+SELECT id, geometry IS NULL FROM osmium_read('test/data/incomplete.osm') WHERE kind = 'line' ORDER BY id;
+----
+10	false
+11	true
+
+# Areas that can't be built are returned with NULL geometry:
+#   13  a closed way (non-relation area) referencing a missing node
+#   30  a multipolygon relation whose member way is missing
+#   31  a boundary relation with no way members
+# The complete closed-way area (12) keeps its geometry.
+query II
+SELECT id, geometry IS NULL FROM osmium_read('test/data/incomplete.osm') WHERE kind = 'area' ORDER BY id;
+----
+12	false
+13	true
+30	true
+31	true
+
+# The same area rows are present when geometry is not projected.
+query I
+SELECT count(*) FROM osmium_read('test/data/incomplete.osm') WHERE kind = 'area';
+----
+4
+
+# Tags and metadata are still populated on NULL-geometry rows.
+query IT
+SELECT id, tags['building'] FROM osmium_read('test/data/incomplete.osm') WHERE kind = 'area' AND id = 30;
+----
+30	yes
