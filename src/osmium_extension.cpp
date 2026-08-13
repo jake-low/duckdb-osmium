@@ -3,6 +3,8 @@
 #include "osmium_extension.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/geometry.hpp"
 #include "duckdb/main/config.hpp"
@@ -35,6 +37,7 @@
 #include <osmium/relations/manager_util.hpp>
 #include <osmium/visitor.hpp>
 
+#include <algorithm>
 #include <cstring>
 #include <functional>
 
@@ -73,11 +76,35 @@ struct KindFilter {
 	bool NeedsMultipolygonManager() const {
 		return areas;
 	}
+
+	bool operator==(const KindFilter &other) const {
+		return nodes == other.nodes && lines == other.lines && areas == other.areas && relations == other.relations;
+	}
 };
 
 struct TagPredicate {
 	std::string key;
 	std::unordered_set<std::string> values; // empty = key-exists check; non-empty = value IN values
+
+	bool operator==(const TagPredicate &other) const {
+		return key == other.key && values == other.values;
+	}
+
+	void Serialize(duckdb::Serializer &serializer) const {
+		// sort the values so that unordered sets which are equal (by ==) are serialized identically
+		duckdb::vector<std::string> sorted_values(values.begin(), values.end());
+		std::sort(sorted_values.begin(), sorted_values.end());
+		serializer.WriteProperty(100, "key", key);
+		serializer.WriteProperty(101, "values", sorted_values);
+	}
+
+	static TagPredicate Deserialize(duckdb::Deserializer &deserializer) {
+		TagPredicate result;
+		result.key = deserializer.ReadProperty<std::string>(100, "key");
+		auto values = deserializer.ReadProperty<duckdb::vector<std::string>>(101, "values");
+		result.values.insert(values.begin(), values.end());
+		return result;
+	}
 };
 
 static const char *KIND_NAMES[] = {"node", "line", "area", "relation"};
@@ -305,9 +332,52 @@ struct OsmBindData : public duckdb::TableFunctionData {
 
 	bool Equals(const duckdb::FunctionData &other) const override {
 		auto &o = other.Cast<OsmBindData>();
-		return file_path == o.file_path;
+		return file_path == o.file_path && kind_filter == o.kind_filter && tag_predicates == o.tag_predicates;
 	}
 };
+
+// Serialize bind data to bytes. DuckDB calls this in the subplan optimizer to
+// identify duplicate subplans and avoid running them twice. This can lead to
+// bugs if logically different queries serialize to the same bytes, so we need
+// to be careful to include every pushed-down filter expression in the serial
+// representation. The default implementation of this function only includes
+// the function arguments, which will produce wrong results when predicate
+// pushdown is implemented.
+static void OsmSerialize(duckdb::Serializer &serializer, const duckdb::optional_ptr<duckdb::FunctionData> bind_data_p,
+                         const duckdb::TableFunction &) {
+	auto &bind_data = bind_data_p->Cast<OsmBindData>();
+
+	duckdb::vector<duckdb::vector<TagPredicate>> groups;
+	groups.reserve(bind_data.tag_predicates.size());
+	for (const auto &group : bind_data.tag_predicates) {
+		groups.emplace_back(group.begin(), group.end());
+	}
+
+	serializer.WriteProperty(100, "file_path", bind_data.file_path);
+	serializer.WriteProperty(101, "kind_nodes", bind_data.kind_filter.nodes);
+	serializer.WriteProperty(102, "kind_lines", bind_data.kind_filter.lines);
+	serializer.WriteProperty(103, "kind_areas", bind_data.kind_filter.areas);
+	serializer.WriteProperty(104, "kind_relations", bind_data.kind_filter.relations);
+	serializer.WriteProperty(105, "tag_predicates", groups);
+}
+
+static duckdb::unique_ptr<duckdb::FunctionData> OsmDeserialize(duckdb::Deserializer &deserializer,
+                                                               duckdb::TableFunction &) {
+	auto bind_data = duckdb::make_uniq<OsmBindData>();
+	bind_data->file_path = deserializer.ReadProperty<std::string>(100, "file_path");
+	bind_data->kind_filter.nodes = deserializer.ReadProperty<bool>(101, "kind_nodes");
+	bind_data->kind_filter.lines = deserializer.ReadProperty<bool>(102, "kind_lines");
+	bind_data->kind_filter.areas = deserializer.ReadProperty<bool>(103, "kind_areas");
+	bind_data->kind_filter.relations = deserializer.ReadProperty<bool>(104, "kind_relations");
+
+	auto groups = deserializer.ReadProperty<duckdb::vector<duckdb::vector<TagPredicate>>>(105, "tag_predicates");
+	bind_data->tag_predicates.reserve(groups.size());
+	for (const auto &group : groups) {
+		bind_data->tag_predicates.emplace_back(group.begin(), group.end());
+	}
+
+	return std::move(bind_data);
+}
 
 struct OsmGlobalState : public duckdb::GlobalTableFunctionState {
 	std::unique_ptr<osmium::io::Reader> reader;
@@ -1348,6 +1418,8 @@ static duckdb::TableFunction GetOsmScanFunction() {
 	duckdb::TableFunction func("osmium_read", {duckdb::LogicalType::VARCHAR}, OsmScan, OsmBind, OsmInitGlobal);
 	func.projection_pushdown = true;
 	func.pushdown_complex_filter = OsmComplexFilterPushdown;
+	func.serialize = OsmSerialize;
+	func.deserialize = OsmDeserialize;
 	return func;
 }
 

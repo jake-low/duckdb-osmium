@@ -1,0 +1,110 @@
+# name: test/sql/scan_reuse.test
+# description: multiple scans of the same file in one query
+# group: [sql]
+
+require osmium
+
+# Single scans (for reference)
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node';
+----
+317
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area';
+----
+77
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['highway'] IS NOT NULL;
+----
+233
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['building'] IS NOT NULL;
+----
+85
+
+# Two scans of the same file with different kind filters
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node') AS nodes,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area') AS areas;
+----
+317	77
+
+# Same, with the order flipped
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area') AS areas,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node') AS nodes;
+----
+77	317
+
+# Two scans differing only in their tag predicates
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['highway'] IS NOT NULL) AS highways,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['building'] IS NOT NULL) AS buildings;
+----
+233	85
+
+# Two scans whose tag predicates share a key and differ only in the values
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['highway'] = 'service') AS service,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['highway'] = 'footway') AS footway;
+----
+24	137
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['highway'] IN ('service', 'residential')) AS a,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['highway'] IN ('service', 'footway')) AS b;
+----
+28	161
+
+# Three scans, mixing kind and tag predicates
+
+query III
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node') AS nodes,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE tags['building'] IS NOT NULL) AS buildings,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm')) AS all_rows;
+----
+317	85	711
+
+# A scan with a filter alongside an unfiltered scan of the same file
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm')) AS all_rows,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation') AS relations;
+----
+711	13
+
+# Two scans over the same file, aggregated by a join
+
+query II
+SELECT n.c, a.c FROM
+    (SELECT count(*) AS c FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node') n,
+    (SELECT count(*) AS c FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area') a;
+----
+317	77
+
+# Two scans over the same file, aggregated by a set operation
+
+query TI
+SELECT kind, count(*) FROM (
+    SELECT kind FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node'
+    UNION ALL
+    SELECT kind FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area'
+) GROUP BY kind ORDER BY kind;
+----
+area	77
+node	317
