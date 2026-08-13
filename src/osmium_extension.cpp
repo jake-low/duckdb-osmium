@@ -3,6 +3,7 @@
 #include "osmium_extension.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
@@ -295,14 +296,18 @@ static std::string GetIndexConfig(duckdb::ClientContext &context) {
 	return index_type;
 }
 
-static std::string MakeCacheKey(const std::string &file_path, const std::string &index_config) {
-	return "osmium_node_index:" + file_path + ":" + index_config;
+static std::string MakeCacheKey(duckdb::ClientContext &context, const std::string &file_path,
+                                const std::string &index_config) {
+	auto &fs = duckdb::FileSystem::GetFileSystem(context);
+	auto handle = fs.OpenFile(file_path, duckdb::FileFlags::FILE_FLAGS_READ);
+	return "osmium_node_index:" + file_path + ":" + std::to_string(fs.GetFileSize(*handle)) + ":" +
+	       std::to_string(fs.GetLastModifiedTime(*handle).value) + ":" + index_config;
 }
 
 static duckdb::shared_ptr<CachedNodeIndex> GetOrBuildNodeIndex(duckdb::ClientContext &context,
                                                                const std::string &file_path) {
 	auto index_config = GetIndexConfig(context);
-	auto cache_key = MakeCacheKey(file_path, index_config);
+	auto cache_key = MakeCacheKey(context, file_path, index_config);
 
 	auto &cache = duckdb::ObjectCache::GetObjectCache(context);
 	auto entry = cache.Get<CachedNodeIndex>(cache_key);
