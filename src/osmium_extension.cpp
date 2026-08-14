@@ -8,6 +8,7 @@
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/geometry.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
@@ -296,10 +297,16 @@ struct CachedNodeIndex : public duckdb::ObjectCacheEntry {
 		return index && index->size() > 0;
 	}
 
-	void Populate(const std::string &pbf_path) {
+	void Populate(duckdb::ClientContext &context, const std::string &pbf_path) {
 		osmium::io::Reader reader {pbf_path, osmium::osm_entity_bits::node};
 		location_handler_type handler {*index};
-		osmium::apply(reader, handler);
+		while (osmium::memory::Buffer buffer = reader.read()) {
+			if (context.interrupted) {
+				throw duckdb::InterruptException();
+			}
+
+			osmium::apply(buffer, handler);
+		}
 		reader.close();
 	}
 };
@@ -346,7 +353,7 @@ static duckdb::shared_ptr<CachedNodeIndex> GetOrBuildNodeIndex(duckdb::ClientCon
 	}
 
 	auto new_entry = duckdb::make_shared_ptr<CachedNodeIndex>(file_path, index_config);
-	new_entry->Populate(file_path);
+	new_entry->Populate(context, file_path);
 	cache.Put(cache_key, new_entry);
 	return new_entry;
 }
@@ -1188,6 +1195,10 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 		// so the selective resolver knows which ways need locations.
 		osmium::io::Reader rel_reader {bind_data.file_path, osmium::osm_entity_bits::relation};
 		while (osmium::memory::Buffer buffer = rel_reader.read()) {
+			if (context.interrupted) {
+				throw duckdb::InterruptException();
+			}
+
 			osmium::apply(buffer, *state->mp_manager);
 		}
 		rel_reader.close();
@@ -1257,6 +1268,10 @@ static void OsmScan(duckdb::ClientContext &context, duckdb::TableFunctionInput &
 
 			if (state.exhausted) {
 				break;
+			}
+
+			if (context.interrupted) {
+				throw duckdb::InterruptException();
 			}
 
 			osmium::memory::Buffer buffer = state.reader->read();
