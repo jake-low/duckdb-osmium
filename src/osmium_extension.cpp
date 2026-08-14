@@ -241,11 +241,33 @@ private:
 	const std::unordered_set<osmium::object_id_type> &m_way_ids;
 };
 
+// Index types that store their data in a mmap'd file on disk, rather than in memory.
+// The mmap_array types are NOT among them: those are anonymous mappings, which are
+// basically virtual files stored in memory.
+//
+// Used to determine whether libosmium's index->used_memory() is reporting bytes in RAM
+// or on disk; if it's RAM then we pass that along to DuckDB via GetEstimatedCacheMemory(),
+// so it'll count towards DuckDB's memory_limit setting. If the index is on disk, we ignore
+// those bytes (so they don't count towards memory_limit).
+static const char *FILE_BACKED_INDEX_TYPES[] = {"dense_file_array", "sparse_file_array"};
+
+static bool IsFileBackedIndex(const std::string &index_config) {
+	auto index_type = index_config.substr(0, index_config.find(','));
+	for (const auto *name : FILE_BACKED_INDEX_TYPES) {
+		if (index_type == name) {
+			return true;
+		}
+	}
+	return false;
+}
+
 struct CachedNodeIndex : public duckdb::ObjectCacheEntry {
 	std::unique_ptr<location_index_type> index;
 	std::string file_path;
+	bool file_backed;
 
-	explicit CachedNodeIndex(const std::string &path, const std::string &index_config) : file_path(path) {
+	explicit CachedNodeIndex(const std::string &path, const std::string &index_config)
+	    : file_path(path), file_backed(IsFileBackedIndex(index_config)) {
 		auto &factory = osmium::index::MapFactory<osmium::unsigned_object_id_type, osmium::Location>::instance();
 		index = factory.create_map(index_config);
 	}
@@ -258,9 +280,16 @@ struct CachedNodeIndex : public duckdb::ObjectCacheEntry {
 		return "osmium_node_location_index";
 	}
 
-	// Non-evictable: return invalid index
 	duckdb::optional_idx GetEstimatedCacheMemory() const override {
-		return duckdb::optional_idx {};
+		if (file_backed) {
+			// file backed indexes don't cost any RAM, so we don't want their
+			// sizes to count towards DuckDB's memory_limit setting.
+			return duckdb::optional_idx {};
+		}
+		// reporting a size puts the index in DuckDB's object cache LRU, so that
+		// it counts towards the memory limit and can be evicted, rather than
+		// being pinned for the lifetime of the database connection.
+		return index->used_memory();
 	}
 
 	bool IsPopulated() const {
