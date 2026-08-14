@@ -111,3 +111,79 @@ query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND kind = 'area';
 ----
 0
+
+# ANDed kind predicates intersect
+#
+# Each of these is two (or more) kind predicates joined by AND, so only the
+# kinds present in every predicate should be returned. The result must not
+# depend on the order the predicates are written in.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'line') AND kind IN ('line', 'area');
+----
+304
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('line', 'area') AND kind IN ('node', 'line');
+----
+304
+
+query TI
+SELECT kind, count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'line') AND kind IN ('line', 'area') GROUP BY kind ORDER BY kind;
+----
+line	304
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE (kind = 'node' OR kind = 'line') AND (kind = 'line' OR kind = 'area');
+----
+304
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE (kind = 'node' OR kind = 'line') AND kind IN ('area', 'line');
+----
+304
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'line') AND kind = 'line';
+----
+304
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND kind IN ('node', 'line');
+----
+304
+
+# three predicates: {node,line,area} ^ {line,area} ^ {area,relation} = {area}
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'line', 'area') AND kind IN ('line', 'area') AND kind IN ('area', 'relation');
+----
+77
+
+# intersection alongside a tag predicate
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'line') AND kind IN ('line', 'area') AND tags['highway'] IS NOT NULL;
+----
+202
+
+# geometry is still constructed for the surviving kind
+query I
+SELECT count(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'line') AND kind IN ('line', 'area');
+----
+303
+
+# disjoint kind predicates match nothing
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'line') AND kind IN ('area', 'relation');
+----
+0
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE (kind = 'node' OR kind = 'line') AND (kind = 'area' OR kind = 'relation');
+----
+0
+
+# ... including when geometry is projected
+query I
+SELECT count(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'line') AND kind IN ('area', 'relation');
+----
+0

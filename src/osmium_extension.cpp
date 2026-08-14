@@ -79,6 +79,18 @@ struct KindFilter {
 		return areas;
 	}
 
+	bool None() const {
+		return !nodes && !lines && !areas && !relations;
+	}
+
+	KindFilter &operator&=(const KindFilter &other) {
+		nodes = nodes && other.nodes;
+		lines = lines && other.lines;
+		areas = areas && other.areas;
+		relations = relations && other.relations;
+		return *this;
+	}
+
 	bool operator==(const KindFilter &other) const {
 		return nodes == other.nodes && lines == other.lines && areas == other.areas && relations == other.relations;
 	}
@@ -1101,7 +1113,7 @@ static void OsmComplexFilterPushdown(duckdb::ClientContext &context, duckdb::Log
 		{
 			KindFilter kf;
 			if (TryExtractKindEquality(*filters[i], get, get.table_index, kf)) {
-				bind_data.kind_filter = kf;
+				bind_data.kind_filter &= kf;
 				consumed = true;
 			}
 		}
@@ -1110,7 +1122,7 @@ static void OsmComplexFilterPushdown(duckdb::ClientContext &context, duckdb::Log
 		if (!consumed) {
 			KindFilter kf;
 			if (TryExtractKindIn(*filters[i], get, get.table_index, kf)) {
-				bind_data.kind_filter = kf;
+				bind_data.kind_filter &= kf;
 				consumed = true;
 			}
 		}
@@ -1119,7 +1131,7 @@ static void OsmComplexFilterPushdown(duckdb::ClientContext &context, duckdb::Log
 		if (!consumed) {
 			KindFilter kf;
 			if (TryExtractKindOr(*filters[i], get, get.table_index, kf)) {
-				bind_data.kind_filter = kf;
+				bind_data.kind_filter &= kf;
 				consumed = true;
 			}
 		}
@@ -1176,6 +1188,13 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 	state->needs_metadata = state->needs_username || state->col_out[COL_VERSION] >= 0 ||
 	                        state->col_out[COL_TIMESTAMP] >= 0 || state->col_out[COL_CHANGESET] >= 0 ||
 	                        state->col_out[COL_UID] >= 0;
+
+	// Contradictory kind predicates (e.g. kind IN ('node') AND kind IN ('area'))
+	// leave no kinds to emit, so there is nothing to read.
+	if (bind_data.kind_filter.None()) {
+		state->exhausted = true;
+		return state;
+	}
 
 	// Build or retrieve cached node location index if needed.
 	bool needs_node_index = state->needs_geometry && bind_data.kind_filter.NeedsNodeIndex();
