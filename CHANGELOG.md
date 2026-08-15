@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.5.2
+
+Released 2026-08-14.
+
+- Fix incorrect results when one query scans the same file twice with different
+  filters (e.g. using a UNION ALL or similar set operator).
+- Discard osmium index from cache if OSM PBF file is modified after opening
+- Report osmium index size to DuckDB so it can manage the LRU cache better
+- Check in read/scan loops to see if query has been cancelled and abort.
+  This means Ctrl-C on a query works immediately.
+- Merge multiple kind conjuncts together (instead of using incorrect
+  last-one-wins semantics)
+
 ## v0.5.1
 
 Released 2026-07-24.
