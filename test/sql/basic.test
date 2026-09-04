@@ -11,20 +11,20 @@ SELECT * FROM osmium_read('nonexistent.osm.pbf');
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm');
 ----
-711
+1853
 
 query TI
 SELECT kind, count(*) FROM osmium_read('test/data/bainbridge.osm') GROUP BY kind ORDER BY kind;
 ----
 area	77
 line	304
-node	317
+node	1459
 relation	13
 
 query TI
 SELECT type, count(*) FROM osmium_read('test/data/bainbridge.osm') GROUP BY type ORDER BY type;
 ----
-node	317
+node	1459
 relation	14
 way	380
 
@@ -34,8 +34,21 @@ SELECT kind, type, count(*) FROM osmium_read('test/data/bainbridge.osm') GROUP B
 area	relation	1
 area	way	76
 line	way	304
-node	node	317
+node	node	1459
 relation	relation	13
+
+# Untagged nodes are emitted too. They make up the bulk of any OSM file, since
+# ways rely on them to define their shapes.
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) = 0;
+----
+1142
+
+# An untagged node has an empty (not NULL) tags map, and still has a geometry.
+query IIT
+SELECT id, cardinality(tags), ST_AsText(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND id = 48519283;
+----
+48519283	0	POINT (-122.5170186 47.624839)
 
 query IT
 SELECT id, tags['name'] FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND tags['name'] IS NOT NULL ORDER BY id LIMIT 3;
@@ -54,4 +67,4 @@ SELECT id, tags['name'] FROM osmium_read('test/data/bainbridge.osm') WHERE kind 
 query I
 SELECT count(*) FROM 'test/data/bainbridge.osm';
 ----
-711
+1853

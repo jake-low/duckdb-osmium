@@ -180,11 +180,12 @@ SELECT kind, type, id FROM osmium_read('test/data/idcollide.osm') WHERE id = 2 O
 area	relation	2
 area	way	2
 line	way	2
+node	node	2
 
 query I
 SELECT count(*) FROM osmium_read('test/data/idcollide.osm') WHERE id IN (1, 2);
 ----
-6
+7
 
 # id narrowed by type
 

@@ -48,7 +48,7 @@ SELECT count(*) FROM (
   SELECT timestamp FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node'
 );
 ----
-317
+1459
 
 # timestamp can be selected alongside other columns and ordered. (Compared
 # against a literal rather than displayed, so the result is TimeZone-independent.)

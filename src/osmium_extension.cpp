@@ -667,9 +667,6 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 			if (!ids.Matches(node.id())) {
 				continue;
 			}
-			if (node.tags().empty()) {
-				continue;
-			}
 			if (!MatchesTagPredicates(node.tags(), preds)) {
 				continue;
 			}

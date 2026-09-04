@@ -9,7 +9,7 @@ require osmium
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node';
 ----
-317
+1459
 
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line';
@@ -30,30 +30,30 @@ SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relat
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'relation');
 ----
-330
+1472
 
 query TI
 SELECT kind, count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'relation') GROUP BY kind ORDER BY kind;
 ----
-node	317
+node	1459
 relation	13
 
 # kind IN with three values
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind IN ('node', 'line', 'area');
 ----
-698
+1840
 
 # kind OR (equivalent to kind IN)
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' OR kind = 'area';
 ----
-394
+1536
 
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' OR kind = 'line';
 ----
-621
+1763
 
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' OR kind = 'relation';

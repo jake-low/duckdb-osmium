@@ -62,4 +62,4 @@ SELECT count(*) FROM (
   SELECT username FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node'
 );
 ----
-317
+1459

@@ -9,7 +9,7 @@ require osmium
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node';
 ----
-317
+1459
 
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way';
@@ -45,7 +45,7 @@ relation	13
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('node', 'way');
 ----
-697
+1839
 
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('way', 'relation');
@@ -55,14 +55,14 @@ SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('way
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('node', 'way', 'relation');
 ----
-711
+1853
 
 # type = 'x' OR type = 'y'
 
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node' OR type = 'relation';
 ----
-331
+1473
 
 # ANDed type predicates intersect, and the result is order-independent.
 
@@ -94,7 +94,7 @@ SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('nod
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node' AND kind = 'node';
 ----
-317
+1459
 
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way' AND kind = 'line';
@@ -169,7 +169,7 @@ SELECT count(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE type =
 query I
 SELECT count(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node';
 ----
-317
+1459
 
 query I
 SELECT count(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way';

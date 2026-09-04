@@ -69,8 +69,8 @@ The following columns are available:
 - `kind` - the constructed type; one of `node`, `line`, `area`, or `relation` (see next section)
 - `type` - the original OSM type; one of `node`, `way`, or `relation`
 - `id` - the OSM ID (unique among elements of the same type; for a globally unique key you want `(type, id)`)
-- `tags` - the element's tags, as a `MAP(VARCHAR, VARCHAR)`
-- `geometry` - the constructed geometry; a Point, LineString, Polygon, or MultiPolygon depending on `kind` (NULL for `relation` rows)
+- `tags` - the element's tags, as a `MAP(VARCHAR, VARCHAR)`; untagged elements are included by default, but you can add `WHERE cardinality(tags) > 0` to exclude them
+- `geometry` - the constructed geometry; a Point, LineString, Polygon, or MultiPolygon depending on `kind` (NULL for `relation` rows or if the element's geometry could not be properly constructed)
 - `version` - the element's version number, which OSM increments each time it is modified (`UINTEGER`)
 - `timestamp` - the time of the element's last edit, as a `TIMESTAMP WITH TIME ZONE` in UTC
 - `changeset` - the ID of the changeset the element was last edited in (`UINTEGER`)
@@ -87,7 +87,7 @@ The `version`, `timestamp`, `changeset`, `uid`, and `username` columns come from
 Closed ways in OSM can represent either lines or polygons. Which interpretation is indended is implied by the element's tags. For example, a closed way with `highway=roundabout` represents a LineString; one with `building=house` represents a Polygon.
 
 This extension does not have any opinion on which tags imply features are lines or areas; it's up to you to specify which you want in your query. This is what the `kind` column is for. It has four possible values:
-- `node`: a tagged OSM node; its `geometry` will be a `Point`
+- `node`: an OSM node; its `geometry` will be a `Point`
 - `line`: an open Way, or a closed way that is not tagged `area=yes`; its geometry will be a `LineString`
 - `area`: a closed Way that is not tagged `area=no`, or a Relation with `type=multipolygon` or `type=boundary`. Its geometry will be a `Polygon` or `MultiPolygon`
 - `relation`: other Relation types; they have NULL geometry

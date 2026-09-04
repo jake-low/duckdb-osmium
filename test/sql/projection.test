@@ -7,14 +7,14 @@ require osmium
 query I
 SELECT id FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' ORDER BY id LIMIT 3;
 ----
-609981906
-609984211
-609994795
+48519283
+48521103
+48521105
 
 query TI
 SELECT kind, id FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' ORDER BY id LIMIT 1;
 ----
-node	609981906
+node	48519283
 
 query TI
 SELECT type, id FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' ORDER BY id LIMIT 1;

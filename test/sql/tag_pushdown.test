@@ -148,7 +148,7 @@ SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE (kind = 'node
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND tags['highway'] IS NULL;
 ----
-287
+1429
 
 query I
 SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND tags['highway'] IS NOT NULL AND tags['highway'] != 'crossing';
