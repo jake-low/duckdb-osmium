@@ -1,0 +1,27 @@
+# name: test/sql/geometry.test
+# description: geometry type verification (requires spatial extension)
+# group: [sql]
+
+require osmium
+
+require spatial
+
+query IT
+SELECT id, ST_AsText(ST_GeomFromWKB(geometry)) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND id = 609981906;
+----
+609981906	POINT (-122.520835 47.6247077)
+
+query T
+SELECT ST_GeometryType(ST_GeomFromWKB(geometry)) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND id = 5913873;
+----
+LINESTRING
+
+query T
+SELECT ST_GeometryType(ST_GeomFromWKB(geometry)) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND id = 52384079;
+----
+POLYGON
+
+query T
+SELECT ST_GeometryType(ST_GeomFromWKB(geometry)) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND id = 19821512 AND geometry IS NOT NULL;
+----
+MULTIPOLYGON

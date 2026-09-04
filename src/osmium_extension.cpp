@@ -71,18 +71,6 @@ struct KindFilter {
 	bool areas = true;
 	bool relations = true;
 
-	bool NeedsNodeIndex() const {
-		return lines || areas;
-	}
-
-	bool NeedsMultipolygonManager() const {
-		return areas;
-	}
-
-	bool None() const {
-		return !nodes && !lines && !areas && !relations;
-	}
-
 	KindFilter &operator&=(const KindFilter &other) {
 		nodes = nodes && other.nodes;
 		lines = lines && other.lines;
@@ -93,6 +81,63 @@ struct KindFilter {
 
 	bool operator==(const KindFilter &other) const {
 		return nodes == other.nodes && lines == other.lines && areas == other.areas && relations == other.relations;
+	}
+};
+
+struct TypeFilter {
+	bool nodes = true;
+	bool ways = true;
+	bool relations = true;
+
+	TypeFilter &operator&=(const TypeFilter &other) {
+		nodes = nodes && other.nodes;
+		ways = ways && other.ways;
+		relations = relations && other.relations;
+		return *this;
+	}
+
+	bool operator==(const TypeFilter &other) const {
+		return nodes == other.nodes && ways == other.ways && relations == other.relations;
+	}
+};
+
+// Only five (kind, type) pairs sensible: (node, node), (line, way), (area, way)
+// (area, relation) and (relation, relation). The others represent conditions
+// that no element can match, so we can skip reading the file at all.
+static bool NoMatchingKindAndType(const KindFilter &kinds, const TypeFilter &types) {
+	return !(kinds.nodes && types.nodes) && !((kinds.lines || kinds.areas) && types.ways) &&
+	       !((kinds.areas || kinds.relations) && types.relations);
+}
+
+struct IdFilter {
+	bool active = false;             // if inactive, no ID filtering is performed
+	std::unordered_set<int64_t> ids; // if active, an element must have an ID in this set to be matched
+
+	bool Matches(int64_t id) const {
+		return !active || ids.count(id) > 0;
+	}
+
+	void Intersect(const std::unordered_set<int64_t> &other) {
+		if (!active) {
+			ids = other;
+			active = true;
+			return;
+		}
+		std::unordered_set<int64_t> both;
+		for (auto id : other) {
+			if (ids.count(id)) {
+				both.insert(id);
+			}
+		}
+		ids = std::move(both);
+	}
+
+	bool None() const {
+		return active && ids.empty();
+	}
+
+	bool operator==(const IdFilter &other) const {
+		return active == other.active && ids == other.ids;
 	}
 };
 
@@ -178,10 +223,12 @@ class RelationAreaManager
 	using assembler_config_type = typename TAssembler::config_type;
 	assembler_config_type m_assembler_config;
 	std::vector<std::vector<TagPredicate>> m_predicates;
+	IdFilter m_ids;
 
 public:
-	explicit RelationAreaManager(assembler_config_type config, std::vector<std::vector<TagPredicate>> predicates = {})
-	    : m_assembler_config(std::move(config)), m_predicates(std::move(predicates)) {
+	explicit RelationAreaManager(assembler_config_type config, std::vector<std::vector<TagPredicate>> predicates = {},
+	                             IdFilter ids = {})
+	    : m_assembler_config(std::move(config)), m_predicates(std::move(predicates)), m_ids(std::move(ids)) {
 	}
 
 	// Called with a relation the assembler failed to build geometry for, so the
@@ -189,6 +236,9 @@ public:
 	std::function<void(const osmium::Relation &)> failed_relation_callback;
 
 	bool new_relation(const osmium::Relation &relation) const {
+		if (!m_ids.Matches(relation.id())) {
+			return false;
+		}
 		const char *type = relation.tags().get_value_by_key("type");
 		if (!type) {
 			return false;
@@ -373,19 +423,24 @@ static duckdb::shared_ptr<CachedNodeIndex> GetOrBuildNodeIndex(duckdb::ClientCon
 struct OsmBindData : public duckdb::TableFunctionData {
 	std::string file_path;
 	KindFilter kind_filter;
+	TypeFilter type_filter;
+	IdFilter id_filter;
 	std::vector<std::vector<TagPredicate>> tag_predicates;
 
 	duckdb::unique_ptr<duckdb::FunctionData> Copy() const override {
 		auto copy = duckdb::make_uniq<OsmBindData>();
 		copy->file_path = file_path;
 		copy->kind_filter = kind_filter;
+		copy->type_filter = type_filter;
+		copy->id_filter = id_filter;
 		copy->tag_predicates = tag_predicates;
 		return copy;
 	}
 
 	bool Equals(const duckdb::FunctionData &other) const override {
 		auto &o = other.Cast<OsmBindData>();
-		return file_path == o.file_path && kind_filter == o.kind_filter && tag_predicates == o.tag_predicates;
+		return file_path == o.file_path && kind_filter == o.kind_filter && type_filter == o.type_filter &&
+		       id_filter == o.id_filter && tag_predicates == o.tag_predicates;
 	}
 };
 
@@ -406,12 +461,21 @@ static void OsmSerialize(duckdb::Serializer &serializer, const duckdb::optional_
 		groups.emplace_back(group.begin(), group.end());
 	}
 
+	// sort the ids so that unordered sets which are equal (by ==) are serialized identically
+	duckdb::vector<int64_t> sorted_ids(bind_data.id_filter.ids.begin(), bind_data.id_filter.ids.end());
+	std::sort(sorted_ids.begin(), sorted_ids.end());
+
 	serializer.WriteProperty(100, "file_path", bind_data.file_path);
 	serializer.WriteProperty(101, "kind_nodes", bind_data.kind_filter.nodes);
 	serializer.WriteProperty(102, "kind_lines", bind_data.kind_filter.lines);
 	serializer.WriteProperty(103, "kind_areas", bind_data.kind_filter.areas);
 	serializer.WriteProperty(104, "kind_relations", bind_data.kind_filter.relations);
 	serializer.WriteProperty(105, "tag_predicates", groups);
+	serializer.WriteProperty(106, "type_nodes", bind_data.type_filter.nodes);
+	serializer.WriteProperty(107, "type_ways", bind_data.type_filter.ways);
+	serializer.WriteProperty(108, "type_relations", bind_data.type_filter.relations);
+	serializer.WriteProperty(109, "id_filter_active", bind_data.id_filter.active);
+	serializer.WriteProperty(110, "id_filter_ids", sorted_ids);
 }
 
 static duckdb::unique_ptr<duckdb::FunctionData> OsmDeserialize(duckdb::Deserializer &deserializer,
@@ -428,6 +492,14 @@ static duckdb::unique_ptr<duckdb::FunctionData> OsmDeserialize(duckdb::Deseriali
 	for (const auto &group : groups) {
 		bind_data->tag_predicates.emplace_back(group.begin(), group.end());
 	}
+
+	bind_data->type_filter.nodes = deserializer.ReadProperty<bool>(106, "type_nodes");
+	bind_data->type_filter.ways = deserializer.ReadProperty<bool>(107, "type_ways");
+	bind_data->type_filter.relations = deserializer.ReadProperty<bool>(108, "type_relations");
+
+	bind_data->id_filter.active = deserializer.ReadProperty<bool>(109, "id_filter_active");
+	auto ids = deserializer.ReadProperty<duckdb::vector<int64_t>>(110, "id_filter_ids");
+	bind_data->id_filter.ids.insert(ids.begin(), ids.end());
 
 	return std::move(bind_data);
 }
@@ -447,6 +519,8 @@ struct OsmGlobalState : public duckdb::GlobalTableFunctionState {
 	bool exhausted = false;
 
 	KindFilter kind_filter;
+	TypeFilter type_filter;
+	IdFilter id_filter;
 	std::vector<std::vector<TagPredicate>> tag_predicates;
 
 	// Column mapping: schema column index -> output vector index (-1 if not projected)
@@ -532,6 +606,8 @@ static OsmRow MakeRelationAreaRow(const OsmGlobalState &state, const osmium::Rel
 // to the assembler (which may produce multipolygon area rows via callback).
 static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer) {
 	auto &filter = state.kind_filter;
+	auto &types = state.type_filter;
+	auto &ids = state.id_filter;
 	auto &preds = state.tag_predicates;
 	auto &batch = state.current_batch;
 
@@ -582,8 +658,11 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 		osmium::apply(buffer, resolver, mp_handler);
 	}
 
-	if (filter.nodes) {
+	if (filter.nodes && types.nodes) {
 		for (const auto &node : buffer.select<osmium::Node>()) {
+			if (!ids.Matches(node.id())) {
+				continue;
+			}
 			if (node.tags().empty()) {
 				continue;
 			}
@@ -611,8 +690,11 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 		}
 	}
 
-	if (filter.lines || filter.areas) {
+	if ((filter.lines || filter.areas) && types.ways) {
 		for (auto &way : buffer.select<osmium::Way>()) {
+			if (!ids.Matches(way.id())) {
+				continue;
+			}
 			if (!MatchesTagPredicates(way.tags(), preds)) {
 				continue;
 			}
@@ -696,8 +778,11 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 		}
 	}
 
-	if (filter.relations || filter.areas) {
+	if ((filter.relations || filter.areas) && types.relations) {
 		for (const auto &relation : buffer.select<osmium::Relation>()) {
+			if (!ids.Matches(relation.id())) {
+				continue;
+			}
 			const char *type = relation.tags().get_value_by_key("type");
 			bool is_area_relation =
 			    type && (std::strcmp(type, "multipolygon") == 0 || std::strcmp(type, "boundary") == 0);
@@ -832,125 +917,168 @@ static idx_t ResolveSchemaColumn(const duckdb::LogicalGet &get, idx_t table_inde
 	return column_ids[proj_idx].GetPrimaryIndex();
 }
 
-// Try to set kind_filter bits from a kind string.
-static bool ApplyKindString(const std::string &kind_str, KindFilter &filter) {
-	if (kind_str == "node") {
-		filter.nodes = true;
-	} else if (kind_str == "line") {
-		filter.lines = true;
-	} else if (kind_str == "area") {
-		filter.areas = true;
-	} else if (kind_str == "relation") {
-		filter.relations = true;
-	} else {
+// Try to extract a predicate restricting a single column to a set of constants:
+//
+//   col = 'a'                 ->  {'a'}
+//   col IN ('a', 'b')         ->  {'a', 'b'}
+//   col = 'a' OR col = 'b'    ->  {'a', 'b'}
+//
+// On success sets schema_idx to the column and values to the constants. Used by
+// the kind, type and id filters; tag filtering has its own pushdown extraction
+// logic since the expr shape is different (wrapped in map_extract_value()).
+static bool TryExtractColumnConstants(const duckdb::Expression &expr, const duckdb::LogicalGet &get, idx_t table_index,
+                                      idx_t &schema_idx, std::vector<duckdb::Value> &values) {
+	switch (expr.GetExpressionType()) {
+	case duckdb::ExpressionType::COMPARE_EQUAL: {
+		auto &comp = expr.Cast<duckdb::BoundComparisonExpression>();
+
+		const duckdb::BoundColumnRefExpression *col = nullptr;
+		const duckdb::BoundConstantExpression *val = nullptr;
+		if (comp.left->GetExpressionClass() == duckdb::ExpressionClass::BOUND_COLUMN_REF &&
+		    comp.right->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CONSTANT) {
+			col = &comp.left->Cast<duckdb::BoundColumnRefExpression>();
+			val = &comp.right->Cast<duckdb::BoundConstantExpression>();
+		} else if (comp.right->GetExpressionClass() == duckdb::ExpressionClass::BOUND_COLUMN_REF &&
+		           comp.left->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CONSTANT) {
+			col = &comp.right->Cast<duckdb::BoundColumnRefExpression>();
+			val = &comp.left->Cast<duckdb::BoundConstantExpression>();
+		}
+		if (!col || !val || val->value.IsNull()) {
+			return false;
+		}
+
+		auto idx = ResolveSchemaColumn(get, table_index, col->binding);
+		if (idx == duckdb::DConstants::INVALID_INDEX) {
+			return false;
+		}
+		schema_idx = idx;
+		values = {val->value};
+		return true;
+	}
+	case duckdb::ExpressionType::COMPARE_IN: {
+		auto &op = expr.Cast<duckdb::BoundOperatorExpression>();
+		if (op.children.size() < 2) {
+			return false;
+		}
+		if (op.children[0]->GetExpressionClass() != duckdb::ExpressionClass::BOUND_COLUMN_REF) {
+			return false;
+		}
+		auto &col = op.children[0]->Cast<duckdb::BoundColumnRefExpression>();
+		auto idx = ResolveSchemaColumn(get, table_index, col.binding);
+		if (idx == duckdb::DConstants::INVALID_INDEX) {
+			return false;
+		}
+
+		std::vector<duckdb::Value> result;
+		for (idx_t i = 1; i < op.children.size(); i++) {
+			if (op.children[i]->GetExpressionClass() != duckdb::ExpressionClass::BOUND_CONSTANT) {
+				return false;
+			}
+			auto &c = op.children[i]->Cast<duckdb::BoundConstantExpression>();
+			if (c.value.IsNull()) {
+				return false;
+			}
+			result.push_back(c.value);
+		}
+
+		schema_idx = idx;
+		values = std::move(result);
+		return true;
+	}
+	case duckdb::ExpressionType::CONJUNCTION_OR: {
+		auto &conj = expr.Cast<duckdb::BoundConjunctionExpression>();
+
+		auto common_idx = duckdb::DConstants::INVALID_INDEX;
+		std::vector<duckdb::Value> result;
+		for (const auto &child : conj.children) {
+			auto child_idx = duckdb::DConstants::INVALID_INDEX;
+			std::vector<duckdb::Value> child_values;
+			if (!TryExtractColumnConstants(*child, get, table_index, child_idx, child_values)) {
+				return false;
+			}
+			if (common_idx != duckdb::DConstants::INVALID_INDEX && child_idx != common_idx) {
+				return false;
+			}
+			common_idx = child_idx;
+			result.insert(result.end(), child_values.begin(), child_values.end());
+		}
+		if (common_idx == duckdb::DConstants::INVALID_INDEX) {
+			return false;
+		}
+
+		schema_idx = common_idx;
+		values = std::move(result);
+		return true;
+	}
+	default:
 		return false;
 	}
+}
+
+// Interpret constants compared against the kind column as a set of kinds.
+// Returns false if one of the given values is unknown or not a string. This
+// will skip the predicate pushdown and DuckDB will apply the predicate as a
+// post-filter operation instead.
+static bool ValuesToKindFilter(const std::vector<duckdb::Value> &values, KindFilter &out) {
+	KindFilter result {false, false, false, false};
+	for (const auto &value : values) {
+		if (value.type().id() != duckdb::LogicalTypeId::VARCHAR) {
+			return false;
+		}
+		auto kind = value.GetValue<std::string>();
+		if (kind == "node") {
+			result.nodes = true;
+		} else if (kind == "line") {
+			result.lines = true;
+		} else if (kind == "area") {
+			result.areas = true;
+		} else if (kind == "relation") {
+			result.relations = true;
+		} else {
+			return false;
+		}
+	}
+	out = result;
 	return true;
 }
 
-// Try to extract a kind = 'literal' equality from a comparison expression.
-static bool TryExtractKindEquality(const duckdb::Expression &expr, const duckdb::LogicalGet &get, idx_t table_index,
-                                   KindFilter &filter) {
-	if (expr.GetExpressionType() != duckdb::ExpressionType::COMPARE_EQUAL) {
-		return false;
+// Interpret constants compared against the type column as a set of element types.
+// Returns false if one of the given types is unknown or the wrong type (see above).
+static bool ValuesToTypeFilter(const std::vector<duckdb::Value> &values, TypeFilter &out) {
+	TypeFilter result {false, false, false};
+	for (const auto &value : values) {
+		if (value.type().id() != duckdb::LogicalTypeId::VARCHAR) {
+			return false;
+		}
+		auto type = value.GetValue<std::string>();
+		if (type == "node") {
+			result.nodes = true;
+		} else if (type == "way") {
+			result.ways = true;
+		} else if (type == "relation") {
+			result.relations = true;
+		} else {
+			return false;
+		}
 	}
-	auto &comp = expr.Cast<duckdb::BoundComparisonExpression>();
-
-	const duckdb::BoundColumnRefExpression *col = nullptr;
-	const duckdb::BoundConstantExpression *val = nullptr;
-
-	if (comp.left->GetExpressionClass() == duckdb::ExpressionClass::BOUND_COLUMN_REF &&
-	    comp.right->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CONSTANT) {
-		col = &comp.left->Cast<duckdb::BoundColumnRefExpression>();
-		val = &comp.right->Cast<duckdb::BoundConstantExpression>();
-	} else if (comp.right->GetExpressionClass() == duckdb::ExpressionClass::BOUND_COLUMN_REF &&
-	           comp.left->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CONSTANT) {
-		col = &comp.right->Cast<duckdb::BoundColumnRefExpression>();
-		val = &comp.left->Cast<duckdb::BoundConstantExpression>();
-	}
-
-	if (!col || !val) {
-		return false;
-	}
-
-	auto schema_idx = ResolveSchemaColumn(get, table_index, col->binding);
-	if (schema_idx != COL_KIND) {
-		return false;
-	}
-
-	if (val->value.type().id() != duckdb::LogicalTypeId::VARCHAR) {
-		return false;
-	}
-
-	KindFilter result {false, false, false, false};
-	if (!ApplyKindString(val->value.GetValue<std::string>(), result)) {
-		return false;
-	}
-	filter = result;
+	out = result;
 	return true;
 }
 
-// Try to extract a kind IN ('node', 'area', ...) predicate.
-static bool TryExtractKindIn(const duckdb::Expression &expr, const duckdb::LogicalGet &get, idx_t table_index,
-                             KindFilter &filter) {
-	if (expr.GetExpressionType() != duckdb::ExpressionType::COMPARE_IN) {
-		return false;
-	}
-	auto &op = expr.Cast<duckdb::BoundOperatorExpression>();
-	if (op.children.size() < 2) {
-		return false;
-	}
-
-	// First child must be a column ref to the kind column
-	auto &first = *op.children[0];
-	if (first.GetExpressionClass() != duckdb::ExpressionClass::BOUND_COLUMN_REF) {
-		return false;
-	}
-	auto &col = first.Cast<duckdb::BoundColumnRefExpression>();
-	auto schema_idx = ResolveSchemaColumn(get, table_index, col.binding);
-	if (schema_idx != COL_KIND) {
-		return false;
-	}
-
-	KindFilter result {false, false, false, false};
-	for (idx_t i = 1; i < op.children.size(); i++) {
-		if (op.children[i]->GetExpressionClass() != duckdb::ExpressionClass::BOUND_CONSTANT) {
+// Interpret constants compared against the id column as a set of OSM IDs.
+static bool ValuesToIds(const std::vector<duckdb::Value> &values, std::unordered_set<int64_t> &out) {
+	std::unordered_set<int64_t> result;
+	for (const auto &value : values) {
+		if (!value.type().IsIntegral()) {
 			return false;
 		}
-		auto &c = op.children[i]->Cast<duckdb::BoundConstantExpression>();
-		if (c.value.type().id() != duckdb::LogicalTypeId::VARCHAR) {
+		duckdb::Value id;
+		if (!value.DefaultTryCastAs(duckdb::LogicalType::BIGINT, id, nullptr) || id.IsNull()) {
 			return false;
 		}
-		if (!ApplyKindString(c.value.GetValue<std::string>(), result)) {
-			return false;
-		}
+		result.insert(id.GetValue<int64_t>());
 	}
-
-	filter = result;
-	return true;
-}
-
-// Try to extract a CONJUNCTION_OR where every child is a kind = 'literal' equality.
-static bool TryExtractKindOr(const duckdb::Expression &expr, const duckdb::LogicalGet &get, idx_t table_index,
-                             KindFilter &filter) {
-	if (expr.GetExpressionType() != duckdb::ExpressionType::CONJUNCTION_OR) {
-		return false;
-	}
-	auto &conj = expr.Cast<duckdb::BoundConjunctionExpression>();
-
-	KindFilter result {false, false, false, false};
-	for (const auto &child : conj.children) {
-		KindFilter child_filter {false, false, false, false};
-		if (!TryExtractKindEquality(*child, get, table_index, child_filter)) {
-			return false;
-		}
-		result.nodes = result.nodes || child_filter.nodes;
-		result.lines = result.lines || child_filter.lines;
-		result.areas = result.areas || child_filter.areas;
-		result.relations = result.relations || child_filter.relations;
-	}
-
-	filter = result;
+	out = std::move(result);
 	return true;
 }
 
@@ -1109,30 +1237,32 @@ static void OsmComplexFilterPushdown(duckdb::ClientContext &context, duckdb::Log
 	for (idx_t i = 0; i < filters.size();) {
 		bool consumed = false;
 
-		// Try kind = 'literal' pushdown
+		// Try kind, type and id pushdown. Each restricts a single column to a
+		// set of constants, so they share an extractor. Repeated predicates on
+		// the same column are ANDed together.
 		{
-			KindFilter kf;
-			if (TryExtractKindEquality(*filters[i], get, get.table_index, kf)) {
-				bind_data.kind_filter &= kf;
-				consumed = true;
-			}
-		}
-
-		// Try kind IN ('node', 'area', ...) pushdown
-		if (!consumed) {
-			KindFilter kf;
-			if (TryExtractKindIn(*filters[i], get, get.table_index, kf)) {
-				bind_data.kind_filter &= kf;
-				consumed = true;
-			}
-		}
-
-		// Try kind = 'x' OR kind = 'y' pushdown
-		if (!consumed) {
-			KindFilter kf;
-			if (TryExtractKindOr(*filters[i], get, get.table_index, kf)) {
-				bind_data.kind_filter &= kf;
-				consumed = true;
+			auto schema_idx = duckdb::DConstants::INVALID_INDEX;
+			std::vector<duckdb::Value> values;
+			if (TryExtractColumnConstants(*filters[i], get, get.table_index, schema_idx, values)) {
+				if (schema_idx == COL_KIND) {
+					KindFilter kf;
+					if (ValuesToKindFilter(values, kf)) {
+						bind_data.kind_filter &= kf;
+						consumed = true;
+					}
+				} else if (schema_idx == COL_TYPE) {
+					TypeFilter tf;
+					if (ValuesToTypeFilter(values, tf)) {
+						bind_data.type_filter &= tf;
+						consumed = true;
+					}
+				} else if (schema_idx == COL_ID) {
+					std::unordered_set<int64_t> ids;
+					if (ValuesToIds(values, ids)) {
+						bind_data.id_filter.Intersect(ids);
+						consumed = true;
+					}
+				}
 			}
 		}
 
@@ -1173,6 +1303,8 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 
 	// Copy query parameters
 	state->kind_filter = bind_data.kind_filter;
+	state->type_filter = bind_data.type_filter;
+	state->id_filter = bind_data.id_filter;
 	state->tag_predicates = bind_data.tag_predicates;
 
 	// Determine which columns are projected
@@ -1189,25 +1321,31 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 	                        state->col_out[COL_TIMESTAMP] >= 0 || state->col_out[COL_CHANGESET] >= 0 ||
 	                        state->col_out[COL_UID] >= 0;
 
-	// Contradictory kind predicates (e.g. kind IN ('node') AND kind IN ('area'))
-	// leave no kinds to emit, so there is nothing to read.
-	if (bind_data.kind_filter.None()) {
+	// Contradictory predicates, e.g. `kind IN ('node') AND kind IN ('area')`,
+	// or `kind = 'line' AND type = 'node'`
+	if (NoMatchingKindAndType(bind_data.kind_filter, bind_data.type_filter) || bind_data.id_filter.None()) {
 		state->exhausted = true;
 		return state;
 	}
 
-	// Build or retrieve cached node location index if needed.
-	bool needs_node_index = state->needs_geometry && bind_data.kind_filter.NeedsNodeIndex();
-	if (needs_node_index) {
+	// Which element types produce rows, given both the kind and type filters.
+	bool emit_ways = (bind_data.kind_filter.lines || bind_data.kind_filter.areas) && bind_data.type_filter.ways;
+	bool emit_relations =
+	    (bind_data.kind_filter.relations || bind_data.kind_filter.areas) && bind_data.type_filter.relations;
+
+	// Set up the multipolygon manager if relation-based areas with geometry are needed.
+	bool use_mp_manager = bind_data.kind_filter.areas && bind_data.type_filter.relations && state->needs_geometry;
+
+	// Build or retrieve cached node location index if needed. The multipolygon
+	// assembler needs member way locations too, even when way rows aren't emitted.
+	if (state->needs_geometry && (emit_ways || use_mp_manager)) {
 		state->cached_index = GetOrBuildNodeIndex(context, bind_data.file_path);
 	}
 
-	// Set up the multipolygon manager if areas with geometry are needed.
-	bool use_mp_manager = bind_data.kind_filter.NeedsMultipolygonManager() && state->needs_geometry;
 	if (use_mp_manager) {
 		osmium::area::Assembler::config_type assembler_config;
-		state->mp_manager =
-		    std::make_unique<RelationAreaManager<osmium::area::Assembler>>(assembler_config, bind_data.tag_predicates);
+		state->mp_manager = std::make_unique<RelationAreaManager<osmium::area::Assembler>>(
+		    assembler_config, bind_data.tag_predicates, bind_data.id_filter);
 
 		// Read relations, feed them to the MP manager (which filters
 		// using MatchesTagPredicates internally), and collect member way IDs
@@ -1235,13 +1373,14 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 
 	// Open the main reader with the appropriate entity types.
 	auto entity_bits = osmium::osm_entity_bits::nothing;
-	if (bind_data.kind_filter.nodes) {
+	if (bind_data.kind_filter.nodes && bind_data.type_filter.nodes) {
 		entity_bits |= osmium::osm_entity_bits::node;
 	}
-	if (bind_data.kind_filter.lines || bind_data.kind_filter.areas) {
+	if (emit_ways || use_mp_manager) {
+		// the assembler consumes member ways from the main pass
 		entity_bits |= osmium::osm_entity_bits::way;
 	}
-	if (bind_data.kind_filter.relations || bind_data.kind_filter.areas) {
+	if (emit_relations) {
 		entity_bits |= osmium::osm_entity_bits::relation;
 	}
 	state->reader = std::make_unique<osmium::io::Reader>(bind_data.file_path, entity_bits);

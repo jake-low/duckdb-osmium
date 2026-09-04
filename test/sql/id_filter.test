@@ -1,0 +1,232 @@
+# name: test/sql/id_filter.test
+# description: id filter pushdown and its interaction with the kind and type filters
+# group: [sql]
+
+require osmium
+
+# id = constant
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/bainbridge.osm') WHERE id = 609981906;
+----
+node	node	609981906
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/bainbridge.osm') WHERE id = 1626887;
+----
+relation	relation	1626887
+
+# A closed way with no area tag is emitted twice
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/bainbridge.osm') WHERE id = 52384079 ORDER BY kind;
+----
+area	way	52384079
+line	way	52384079
+
+# An id filter with no matches returns 0 rows
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 999999999999;
+----
+0
+
+# id IN (...)
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id IN (609981906, 52384079, 1626887);
+----
+4
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/bainbridge.osm') WHERE id IN (609981906, 1626887) ORDER BY id;
+----
+relation	relation	1626887
+node	node	609981906
+
+# id = x OR id = y
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 609981906 OR id = 1626887;
+----
+2
+
+# ANDed id predicates intersect, and the result is order-independent.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id IN (609981906, 52384079) AND id IN (52384079, 1626887);
+----
+2
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id IN (52384079, 1626887) AND id IN (609981906, 52384079);
+----
+2
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 609981906 AND id = 1626887;
+----
+0
+
+# id combined with kind
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 52384079 AND kind = 'area';
+----
+1
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 52384079 AND kind = 'line';
+----
+1
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 52384079 AND kind = 'node';
+----
+0
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 609981906 AND kind = 'node';
+----
+1
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 609981906 AND kind = 'line';
+----
+0
+
+# id with geometry projected
+
+query IT
+SELECT id, ST_AsText(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND id = 609981906;
+----
+609981906	POINT (-122.520835 47.6247077)
+
+query I
+SELECT geometry IS NOT NULL FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND id = 5913873;
+----
+true
+
+# A relation-based multipolygon: the id filter has to reach the assembler (which runs in its own pass)
+
+query TTII
+SELECT kind, type, id, geometry IS NOT NULL FROM osmium_read('test/data/bainbridge.osm') WHERE id = 19821512;
+----
+area	relation	19821512	true
+
+query TTII
+SELECT kind, type, id, geometry IS NOT NULL FROM osmium_read('test/data/bainbridge.osm') WHERE id = 19821512 AND kind = 'area';
+----
+area	relation	19821512	true
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 19821512 AND kind = 'relation';
+----
+0
+
+# the id filter must still work when rows are emitted with NULL geometry (e.g. incomplete or invalid multipolygons)
+
+query TTII
+SELECT kind, type, id, geometry IS NULL FROM osmium_read('test/data/incomplete.osm') WHERE id = 30;
+----
+area	relation	30	true
+
+query TTII
+SELECT kind, type, id, geometry IS NULL FROM osmium_read('test/data/incomplete.osm') WHERE id = 31;
+----
+area	relation	31	true
+
+query I
+SELECT count(*) FROM osmium_read('test/data/incomplete.osm') WHERE id IN (30, 31);
+----
+2
+
+query TTII
+SELECT kind, type, id, geometry IS NULL FROM osmium_read('test/data/incomplete.osm') WHERE id = 13;
+----
+area	way	13	true
+
+# id combined with tag predicates
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 52384079 AND tags['leisure'] = 'park';
+----
+2
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 52384079 AND tags['nonexistent_key'] IS NOT NULL;
+----
+0
+
+# Ranges are not equality predicates, so they exercise the non-pushdown path.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' AND id < 1626980;
+----
+5
+
+# IDs are only unique within a type, so an id filter alone can match multiple elements
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/idcollide.osm') WHERE id = 1 ORDER BY kind;
+----
+line	way	1
+node	node	1
+relation	relation	1
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/idcollide.osm') WHERE id = 2 ORDER BY kind, type;
+----
+area	relation	2
+area	way	2
+line	way	2
+
+query I
+SELECT count(*) FROM osmium_read('test/data/idcollide.osm') WHERE id IN (1, 2);
+----
+6
+
+# id narrowed by type
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/idcollide.osm') WHERE id = 1 AND type = 'node';
+----
+node	node	1
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/idcollide.osm') WHERE id = 1 AND type = 'way';
+----
+line	way	1
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/idcollide.osm') WHERE id = 1 AND type = 'relation';
+----
+relation	relation	1
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/idcollide.osm') WHERE id = 2 AND type = 'relation';
+----
+area	relation	2
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/idcollide.osm') WHERE id = 2 AND type = 'way' ORDER BY kind;
+----
+area	way	2
+line	way	2
+
+# id narrowed by type and kind, with geometry projected
+
+query TTII
+SELECT kind, type, id, geometry IS NOT NULL FROM osmium_read('test/data/idcollide.osm') WHERE id = 2 AND type = 'relation' AND kind = 'area';
+----
+area	relation	2	true
+
+query TTII
+SELECT kind, type, id, geometry IS NOT NULL FROM osmium_read('test/data/idcollide.osm') WHERE id = 2 AND type = 'way' AND kind = 'area';
+----
+area	way	2	true
+
+query I
+SELECT count(geometry) FROM osmium_read('test/data/idcollide.osm') WHERE id = 1;
+----
+2

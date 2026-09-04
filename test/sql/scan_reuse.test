@@ -108,3 +108,77 @@ SELECT kind, count(*) FROM (
 ----
 area	77
 node	317
+
+# Two scans differing only in their type filters
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node') AS nodes,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way') AS ways;
+----
+317	380
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way') AS ways,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node') AS nodes;
+----
+380	317
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('node', 'way')) AS a,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('way', 'relation')) AS b;
+----
+697	394
+
+# Two scans sharing a type filter but differing in kind
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'relation' AND kind = 'area') AS areas,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'relation' AND kind = 'relation') AS relations;
+----
+1	13
+
+# Two scans differing only in their id filters
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 52384079) AS a,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 609981906) AS b;
+----
+2	1
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 609981906) AS a,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 52384079) AS b;
+----
+1	2
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id IN (609981906, 52384079)) AS a,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id IN (52384079, 1626887)) AS b;
+----
+3	3
+
+# A scan with an id filter alongside an unfiltered scan of the same file
+
+query II
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm')) AS all_rows,
+    (SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE id = 609981906) AS one;
+----
+711	1
+
+# Scans differing across all three filter dimensions at once
+
+query III
+SELECT
+    (SELECT count(*) FROM osmium_read('test/data/idcollide.osm') WHERE id = 1) AS a,
+    (SELECT count(*) FROM osmium_read('test/data/idcollide.osm') WHERE type = 'way') AS b,
+    (SELECT count(*) FROM osmium_read('test/data/idcollide.osm') WHERE kind = 'area') AS c;
+----
+3	3	2

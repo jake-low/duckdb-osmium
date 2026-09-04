@@ -1,0 +1,238 @@
+# name: test/sql/type_filter.test
+# description: type filter pushdown and its interaction with the kind filter
+# group: [sql]
+
+require osmium
+
+# type = 'literal'
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node';
+----
+317
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way';
+----
+380
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'relation';
+----
+14
+
+# The type column always agrees with the filter.
+
+query TI
+SELECT type, count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way' GROUP BY type;
+----
+way	380
+
+query TI
+SELECT kind, count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way' GROUP BY kind ORDER BY kind;
+----
+area	76
+line	304
+
+query TI
+SELECT kind, count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'relation' GROUP BY kind ORDER BY kind;
+----
+area	1
+relation	13
+
+# type IN (...)
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('node', 'way');
+----
+697
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('way', 'relation');
+----
+394
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('node', 'way', 'relation');
+----
+711
+
+# type = 'x' OR type = 'y'
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node' OR type = 'relation';
+----
+331
+
+# ANDed type predicates intersect, and the result is order-independent.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('node', 'way') AND type IN ('way', 'relation');
+----
+380
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('way', 'relation') AND type IN ('node', 'way');
+----
+380
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node' AND type = 'way';
+----
+0
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('node', 'way') AND type IN ('relation');
+----
+0
+
+# type combined with kind
+#
+# Only five (kind, type) pairs exist: (node, node), (line, way), (area, way),
+# (area, relation) and (relation, relation). Any other combination is empty.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node' AND kind = 'node';
+----
+317
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way' AND kind = 'line';
+----
+304
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way' AND kind = 'area';
+----
+76
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'relation' AND kind = 'area';
+----
+1
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'relation' AND kind = 'relation';
+----
+13
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node' AND kind = 'line';
+----
+0
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node' AND kind = 'area';
+----
+0
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node' AND kind = 'relation';
+----
+0
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way' AND kind = 'node';
+----
+0
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way' AND kind = 'relation';
+----
+0
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'relation' AND kind = 'node';
+----
+0
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'relation' AND kind = 'line';
+----
+0
+
+# Empty (kind, type) combinations still produce nothing when geometry is projected,
+# which is the path that builds the node index and runs the multipolygon assembler.
+
+query I
+SELECT count(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node' AND kind = 'area';
+----
+0
+
+query I
+SELECT count(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way' AND kind = 'relation';
+----
+0
+
+# type with geometry projected
+
+query I
+SELECT count(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node';
+----
+317
+
+query I
+SELECT count(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way';
+----
+379
+
+query I
+SELECT count(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'relation';
+----
+1
+
+# The single relation-based area is only reachable via type = 'relation'.
+
+query TTI
+SELECT kind, type, id FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'relation' AND kind = 'area';
+----
+area	relation	19821512
+
+query I
+SELECT geometry IS NOT NULL FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'relation' AND kind = 'area';
+----
+true
+
+# type combined with tag predicates
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way' AND tags['highway'] IS NOT NULL;
+----
+203
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'way' AND kind = 'line' AND tags['highway'] IS NOT NULL;
+----
+202
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'node' AND tags['amenity'] IN ('cafe', 'restaurant');
+----
+9
+
+# type on a file whose geometry is partly unbuildable
+
+query I
+SELECT count(*) FROM osmium_read('test/data/incomplete.osm') WHERE type = 'relation';
+----
+2
+
+query III
+SELECT kind, id, geometry IS NULL FROM osmium_read('test/data/incomplete.osm') WHERE type = 'way' ORDER BY kind, id;
+----
+area	12	false
+area	13	true
+line	10	false
+line	11	true
+
+# An unrecognized type value is not a valid element type, so it matches nothing.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type = 'changeset';
+----
+0
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE type IN ('way', 'changeset');
+----
+380

@@ -1,0 +1,41 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!--
+  OSM IDs are only unique within an element type; this fixture supports testing
+  queries with ID predicates that match multiple elements of different types.
+-->
+<osm version="0.6">
+  <node id="1" version="1" lat="47.600" lon="-122.500">
+    <tag k="place" v="locality"/>
+    <tag k="name" v="Collideville"/>
+  </node>
+
+  <node id="2" version="1" lat="47.600" lon="-122.500"/>
+  <node id="3" version="1" lat="47.600" lon="-122.490"/>
+  <node id="4" version="1" lat="47.610" lon="-122.490"/>
+
+  <way id="1" version="1">
+    <nd ref="2"/>
+    <nd ref="3"/>
+    <tag k="highway" v="residential"/>
+  </way>
+
+  <way id="2" version="1">
+    <nd ref="2"/>
+    <nd ref="3"/>
+    <nd ref="4"/>
+    <nd ref="2"/>
+    <tag k="building" v="yes"/>
+  </way>
+
+  <relation id="1" version="1">
+    <member type="way" ref="1" role=""/>
+    <tag k="type" v="route"/>
+    <tag k="route" v="bus"/>
+  </relation>
+
+  <relation id="2" version="1">
+    <member type="way" ref="2" role="outer"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="landuse" v="grass"/>
+  </relation>
+</osm>
