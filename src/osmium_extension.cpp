@@ -531,6 +531,9 @@ struct OsmGlobalState : public duckdb::GlobalTableFunctionState {
 	bool needs_tags = false;
 	bool needs_metadata = false; // are any of the metadata columns projected?
 	bool needs_username = false; // username specifically (since copying it requires an allocation)
+	bool needs_refs = false;
+	bool needs_ref_roles = false;
+	bool needs_ref_types = false;
 
 	OsmGlobalState() {
 		for (idx_t i = 0; i < NUM_COLUMNS; i++) {
@@ -830,22 +833,30 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 				row.tags = ExtractTags(relation.tags());
 			}
 
-			for (const auto &member : relation.members()) {
-				row.refs.push_back(member.ref());
-				row.ref_roles.emplace_back(member.role());
-				switch (member.type()) {
-				case osmium::item_type::node:
-					row.ref_types.push_back(TYPE_NODE);
-					break;
-				case osmium::item_type::way:
-					row.ref_types.push_back(TYPE_WAY);
-					break;
-				case osmium::item_type::relation:
-					row.ref_types.push_back(TYPE_RELATION);
-					break;
-				default:
-					row.ref_types.push_back(TYPE_NODE);
-					break;
+			if (state.needs_refs || state.needs_ref_roles || state.needs_ref_types) {
+				for (const auto &member : relation.members()) {
+					if (state.needs_refs) {
+						row.refs.push_back(member.ref());
+					}
+					if (state.needs_ref_roles) {
+						row.ref_roles.emplace_back(member.role());
+					}
+					if (state.needs_ref_types) {
+						switch (member.type()) {
+						case osmium::item_type::node:
+							row.ref_types.push_back(TYPE_NODE);
+							break;
+						case osmium::item_type::way:
+							row.ref_types.push_back(TYPE_WAY);
+							break;
+						case osmium::item_type::relation:
+							row.ref_types.push_back(TYPE_RELATION);
+							break;
+						default:
+							row.ref_types.push_back(TYPE_NODE);
+							break;
+						}
+					}
 				}
 			}
 
@@ -1321,6 +1332,9 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 	state->needs_metadata = state->needs_username || state->col_out[COL_VERSION] >= 0 ||
 	                        state->col_out[COL_TIMESTAMP] >= 0 || state->col_out[COL_CHANGESET] >= 0 ||
 	                        state->col_out[COL_UID] >= 0;
+	state->needs_refs = state->col_out[COL_REFS] >= 0;
+	state->needs_ref_roles = state->col_out[COL_REF_ROLES] >= 0;
+	state->needs_ref_types = state->col_out[COL_REF_TYPES] >= 0;
 
 	auto read_metadata = state->needs_metadata ? osmium::io::read_meta::yes : osmium::io::read_meta::no;
 

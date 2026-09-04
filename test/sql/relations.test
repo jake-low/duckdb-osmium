@@ -35,6 +35,20 @@ SELECT unnest(refs), unnest(ref_types), unnest(ref_roles) FROM osmium_read('test
 5914777	way	(empty)
 117890282	way	(empty)
 
+query T
+SELECT unnest(ref_types) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' AND id = 1626895;
+----
+relation
+relation
+relation
+
+query T
+SELECT unnest(ref_roles) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' AND id = 1626887 LIMIT 3;
+----
+stop
+stop
+stop
+
 # Relation-based multipolygon areas
 
 query TTI
