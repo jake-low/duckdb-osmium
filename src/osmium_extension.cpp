@@ -29,6 +29,7 @@
 #include <osmium/handler/node_locations_for_ways.hpp>
 #include <osmium/index/map/all.hpp>
 #include <osmium/index/node_locations_map.hpp>
+#include <osmium/io/file_format.hpp>
 #include <osmium/io/pbf_input.hpp>
 #include <osmium/io/xml_input.hpp>
 #include <osmium/io/reader.hpp>
@@ -360,7 +361,7 @@ struct CachedNodeIndex : public duckdb::ObjectCacheEntry {
 	}
 
 	void Populate(duckdb::ClientContext &context, const std::string &pbf_path) {
-		osmium::io::Reader reader {pbf_path, osmium::osm_entity_bits::node};
+		osmium::io::Reader reader {pbf_path, osmium::osm_entity_bits::node, osmium::io::read_meta::no};
 		location_handler_type handler {*index};
 		while (osmium::memory::Buffer buffer = reader.read()) {
 			if (context.interrupted) {
@@ -1321,6 +1322,8 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 	                        state->col_out[COL_TIMESTAMP] >= 0 || state->col_out[COL_CHANGESET] >= 0 ||
 	                        state->col_out[COL_UID] >= 0;
 
+	auto read_metadata = state->needs_metadata ? osmium::io::read_meta::yes : osmium::io::read_meta::no;
+
 	// Contradictory predicates, e.g. `kind IN ('node') AND kind IN ('area')`,
 	// or `kind = 'line' AND type = 'node'`
 	if (NoMatchingKindAndType(bind_data.kind_filter, bind_data.type_filter) || bind_data.id_filter.None()) {
@@ -1350,7 +1353,7 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 		// Read relations, feed them to the MP manager (which filters
 		// using MatchesTagPredicates internally), and collect member way IDs
 		// so the selective resolver knows which ways need locations.
-		osmium::io::Reader rel_reader {bind_data.file_path, osmium::osm_entity_bits::relation};
+		osmium::io::Reader rel_reader {bind_data.file_path, osmium::osm_entity_bits::relation, read_metadata};
 		while (osmium::memory::Buffer buffer = rel_reader.read()) {
 			if (context.interrupted) {
 				throw duckdb::InterruptException();
@@ -1383,7 +1386,7 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 	if (emit_relations) {
 		entity_bits |= osmium::osm_entity_bits::relation;
 	}
-	state->reader = std::make_unique<osmium::io::Reader>(bind_data.file_path, entity_bits);
+	state->reader = std::make_unique<osmium::io::Reader>(bind_data.file_path, entity_bits, read_metadata);
 
 	return state;
 }

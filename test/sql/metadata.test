@@ -32,6 +32,21 @@ FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' AND id = 16
 ----
 28	177915349	18290369	tobych
 
+# Relation-sourced area. Without geometry these are read by the main reader...
+query IIIT
+SELECT version, changeset, uid, username
+FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND type = 'relation' AND id = 19821512;
+----
+1	174520808	18290369	tobych
+
+# ...but with geometry they are assembled by the multipolygon manager, which takes
+# their metadata from a separate reader that scans relations ahead of the main pass.
+query IIIIT
+SELECT geometry IS NOT NULL, version, changeset, uid, username
+FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND type = 'relation' AND id = 19821512;
+----
+true	1	174520808	18290369	tobych
+
 # Elements without metadata yield NULL in every metadata column. Way 1456812001
 # (a closed area=yes pedestrian way) has no metadata attributes in the fixture.
 query I
