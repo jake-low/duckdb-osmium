@@ -1500,7 +1500,11 @@ static void OsmScan(duckdb::ClientContext &context, duckdb::TableFunctionInput &
 				if (row.geometry.empty()) {
 					duckdb::FlatVector::SetNull(vec, count, true);
 				} else {
-					auto wkb = duckdb::StringVector::AddStringOrBlob(vec, row.geometry.data(), row.geometry.size());
+					// CAREFUL: don't write this string_t into vec directly. It points at
+					// row.geometry, which is freed when the batch is refilled, possibly
+					// before this chunk is finished. FromBinary is safe because it copies
+					// the data into vec's string heap.
+					duckdb::string_t wkb(row.geometry.data(), row.geometry.size());
 					duckdb::string_t geom;
 					duckdb::Geometry::FromBinary(wkb, geom, vec, true);
 					duckdb::FlatVector::GetData<duckdb::string_t>(vec)[count] = geom;
