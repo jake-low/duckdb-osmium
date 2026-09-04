@@ -1,0 +1,145 @@
+# name: test/sql/tag_count.test
+# description: pushdown of cardinality(tags) comparisons
+# group: [sql]
+
+require osmium
+
+# The two useful ends of the range: tagged and untagged elements.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) > 0;
+----
+317
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) = 0;
+----
+1142
+
+# != 0 is the same as > 0 (a count can't be negative)
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) != 0;
+----
+317
+
+# The constant may be written on either side.
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND 0 < cardinality(tags);
+----
+317
+
+# Bounds other than zero.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) > 2;
+----
+152
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) >= 3;
+----
+152
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) <= 2;
+----
+1307
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) < 3;
+----
+1307
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) = 1;
+----
+121
+
+# The rows that come back really do satisfy the bound.
+
+query I
+SELECT min(cardinality(tags)) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) > 2;
+----
+3
+
+query I
+SELECT max(cardinality(tags)) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) <= 2;
+----
+2
+
+# Repeated bounds narrow the range rather than the last one winning.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) >= 1 AND cardinality(tags) <= 2;
+----
+165
+
+# Contradictory bounds leave an empty range, so nothing is read at all.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE cardinality(tags) > 0 AND cardinality(tags) = 0;
+----
+0
+
+# Applies to every kind, not just nodes.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE cardinality(tags) > 0;
+----
+707
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE cardinality(tags) = 0;
+----
+1146
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'line' AND cardinality(tags) = 0;
+----
+2
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND cardinality(tags) > 0;
+----
+75
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'relation' AND cardinality(tags) > 0;
+----
+13
+
+# Combined with a tag predicate on the same column.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) > 2 AND tags['highway'] IS NOT NULL;
+----
+13
+
+# Relation-based areas are assembled in a separate pass, so the bound has to be checked in the multipolygon manager too.
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND type = 'relation' AND cardinality(tags) > 0 AND geometry IS NOT NULL;
+----
+1
+
+query I
+SELECT count(*) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND type = 'relation' AND cardinality(tags) = 0;
+----
+0
+
+query I
+SELECT count(geometry) FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'area' AND cardinality(tags) > 0;
+----
+75
+
+# Explicitly projecting the tags column doesn't change the result.
+
+query I
+SELECT count(*) FROM (SELECT tags FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) > 0);
+----
+317
+
+query I
+SELECT count(*) FROM (SELECT tags FROM osmium_read('test/data/bainbridge.osm') WHERE kind = 'node' AND cardinality(tags) = 0);
+----
+1142

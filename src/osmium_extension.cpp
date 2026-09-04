@@ -13,6 +13,7 @@
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
@@ -43,6 +44,7 @@
 #include <algorithm>
 #include <cstring>
 #include <functional>
+#include <limits>
 
 enum OsmKind : uint8_t { KIND_NODE = 0, KIND_LINE = 1, KIND_AREA = 2, KIND_RELATION = 3 };
 enum OsmType : uint8_t { TYPE_NODE = 0, TYPE_WAY = 1, TYPE_RELATION = 2 };
@@ -99,6 +101,41 @@ struct TypeFilter {
 
 	bool operator==(const TypeFilter &other) const {
 		return nodes == other.nodes && ways == other.ways && relations == other.relations;
+	}
+};
+
+// A filter that checks if the number of tags on an element falls within the given
+// (inclusive) range. Used for pushdown of `cardinality(tags) > 0` and similar
+// predicates. The default range accepts all elements.
+struct TagCountFilter {
+	uint64_t min = 0;
+	uint64_t max = std::numeric_limits<uint64_t>::max();
+
+	bool Unbounded() const {
+		return min == 0 && max == std::numeric_limits<uint64_t>::max();
+	}
+
+	bool Matches(const osmium::TagList &tags) const {
+		if (Unbounded()) {
+			return true;
+		}
+		const uint64_t n = tags.size();
+		return n >= min && n <= max;
+	}
+
+	// Returns true for an empty range, e.g. cardinality(tags) = 0 AND cardinality(tags) > 0
+	bool None() const {
+		return min > max;
+	}
+
+	TagCountFilter &operator&=(const TagCountFilter &other) {
+		min = std::max(min, other.min);
+		max = std::min(max, other.max);
+		return *this;
+	}
+
+	bool operator==(const TagCountFilter &other) const {
+		return min == other.min && max == other.max;
 	}
 };
 
@@ -218,6 +255,15 @@ static bool MatchesTagPredicates(const osmium::TagList &tags, const std::vector<
 	return true;
 }
 
+// Check an element's tags against every pushed-down filter on the tags column.
+static bool MatchesTagFilters(const osmium::TagList &tags, const std::vector<std::vector<TagPredicate>> &groups,
+                              const TagCountFilter &counts) {
+	// NOTE: order here is intentional; checking counts first is the fastest way to
+	// reject untagged nodes (which make up a large fraction of most OSM PBF files)
+	// when a tag predicate is used.
+	return counts.Matches(tags) && MatchesTagPredicates(tags, groups);
+}
+
 template <typename TAssembler>
 class RelationAreaManager
     : public osmium::relations::RelationsManager<RelationAreaManager<TAssembler>, false, true, false> {
@@ -225,11 +271,13 @@ class RelationAreaManager
 	assembler_config_type m_assembler_config;
 	std::vector<std::vector<TagPredicate>> m_predicates;
 	IdFilter m_ids;
+	TagCountFilter m_tag_counts;
 
 public:
 	explicit RelationAreaManager(assembler_config_type config, std::vector<std::vector<TagPredicate>> predicates = {},
-	                             IdFilter ids = {})
-	    : m_assembler_config(std::move(config)), m_predicates(std::move(predicates)), m_ids(std::move(ids)) {
+	                             IdFilter ids = {}, TagCountFilter tag_counts = {})
+	    : m_assembler_config(std::move(config)), m_predicates(std::move(predicates)), m_ids(std::move(ids)),
+	      m_tag_counts(tag_counts) {
 	}
 
 	// Called with a relation the assembler failed to build geometry for, so the
@@ -247,7 +295,7 @@ public:
 		if (std::strcmp(type, "multipolygon") != 0 && std::strcmp(type, "boundary") != 0) {
 			return false;
 		}
-		return MatchesTagPredicates(relation.tags(), m_predicates);
+		return MatchesTagFilters(relation.tags(), m_predicates, m_tag_counts);
 	}
 
 	void complete_relation(const osmium::Relation &relation) {
@@ -427,6 +475,7 @@ struct OsmBindData : public duckdb::TableFunctionData {
 	TypeFilter type_filter;
 	IdFilter id_filter;
 	std::vector<std::vector<TagPredicate>> tag_predicates;
+	TagCountFilter tag_count_filter;
 
 	duckdb::unique_ptr<duckdb::FunctionData> Copy() const override {
 		auto copy = duckdb::make_uniq<OsmBindData>();
@@ -435,13 +484,14 @@ struct OsmBindData : public duckdb::TableFunctionData {
 		copy->type_filter = type_filter;
 		copy->id_filter = id_filter;
 		copy->tag_predicates = tag_predicates;
+		copy->tag_count_filter = tag_count_filter;
 		return copy;
 	}
 
 	bool Equals(const duckdb::FunctionData &other) const override {
 		auto &o = other.Cast<OsmBindData>();
 		return file_path == o.file_path && kind_filter == o.kind_filter && type_filter == o.type_filter &&
-		       id_filter == o.id_filter && tag_predicates == o.tag_predicates;
+		       id_filter == o.id_filter && tag_predicates == o.tag_predicates && tag_count_filter == o.tag_count_filter;
 	}
 };
 
@@ -477,6 +527,8 @@ static void OsmSerialize(duckdb::Serializer &serializer, const duckdb::optional_
 	serializer.WriteProperty(108, "type_relations", bind_data.type_filter.relations);
 	serializer.WriteProperty(109, "id_filter_active", bind_data.id_filter.active);
 	serializer.WriteProperty(110, "id_filter_ids", sorted_ids);
+	serializer.WriteProperty(111, "tag_count_min", bind_data.tag_count_filter.min);
+	serializer.WriteProperty(112, "tag_count_max", bind_data.tag_count_filter.max);
 }
 
 static duckdb::unique_ptr<duckdb::FunctionData> OsmDeserialize(duckdb::Deserializer &deserializer,
@@ -502,6 +554,9 @@ static duckdb::unique_ptr<duckdb::FunctionData> OsmDeserialize(duckdb::Deseriali
 	auto ids = deserializer.ReadProperty<duckdb::vector<int64_t>>(110, "id_filter_ids");
 	bind_data->id_filter.ids.insert(ids.begin(), ids.end());
 
+	bind_data->tag_count_filter.min = deserializer.ReadProperty<uint64_t>(111, "tag_count_min");
+	bind_data->tag_count_filter.max = deserializer.ReadProperty<uint64_t>(112, "tag_count_max");
+
 	return std::move(bind_data);
 }
 
@@ -523,6 +578,7 @@ struct OsmGlobalState : public duckdb::GlobalTableFunctionState {
 	TypeFilter type_filter;
 	IdFilter id_filter;
 	std::vector<std::vector<TagPredicate>> tag_predicates;
+	TagCountFilter tag_count_filter;
 
 	// Column mapping: schema column index -> output vector index (-1 if not projected)
 	int col_out[NUM_COLUMNS];
@@ -613,6 +669,7 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 	auto &types = state.type_filter;
 	auto &ids = state.id_filter;
 	auto &preds = state.tag_predicates;
+	auto &tag_counts = state.tag_count_filter;
 	auto &batch = state.current_batch;
 
 	// When the MP manager is active, resolve locations for member ways
@@ -631,7 +688,7 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 					continue;
 				}
 
-				if (!MatchesTagPredicates(area.tags(), state.tag_predicates)) {
+				if (!MatchesTagFilters(area.tags(), state.tag_predicates, state.tag_count_filter)) {
 					// TODO: is this necessary? we already checked in RelationAreaManager::new_relation(),
 					// so I think tags will always match here
 					continue;
@@ -667,7 +724,7 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 			if (!ids.Matches(node.id())) {
 				continue;
 			}
-			if (!MatchesTagPredicates(node.tags(), preds)) {
+			if (!MatchesTagFilters(node.tags(), preds, tag_counts)) {
 				continue;
 			}
 			OsmRow row;
@@ -696,7 +753,7 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 			if (!ids.Matches(way.id())) {
 				continue;
 			}
-			if (!MatchesTagPredicates(way.tags(), preds)) {
+			if (!MatchesTagFilters(way.tags(), preds, tag_counts)) {
 				continue;
 			}
 
@@ -795,7 +852,7 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 				if (state.needs_geometry || !filter.areas) {
 					continue;
 				}
-				if (!MatchesTagPredicates(relation.tags(), preds)) {
+				if (!MatchesTagFilters(relation.tags(), preds, tag_counts)) {
 					continue;
 				}
 				OsmRow row;
@@ -815,7 +872,7 @@ static void ProcessBuffer(OsmGlobalState &state, osmium::memory::Buffer &buffer)
 			if (!filter.relations) {
 				continue;
 			}
-			if (!MatchesTagPredicates(relation.tags(), preds)) {
+			if (!MatchesTagFilters(relation.tags(), preds, tag_counts)) {
 				continue;
 			}
 
@@ -1238,6 +1295,125 @@ static bool TryExtractTagPredicateOr(const duckdb::Expression &expr, const duckd
 	return true;
 }
 
+// Strip any casts off an expression. Comparing cardinality(tags) (a UBIGINT)
+// against an integer literal can leave a cast on either side of the expr.
+static const duckdb::Expression &UnwrapCasts(const duckdb::Expression &expr) {
+	const duckdb::Expression *result = &expr;
+	while (result->GetExpressionClass() == duckdb::ExpressionClass::BOUND_CAST) {
+		result = result->Cast<duckdb::BoundCastExpression>().child.get();
+	}
+	return *result;
+}
+
+// Mirror a comparison, so that `n < cardinality(tags)` can be read as
+// `cardinality(tags) > n`. DuckDB has FlipComparisonExpression, but
+// it doesn't appear to really be part of the public API.
+static duckdb::ExpressionType FlipComparison(duckdb::ExpressionType type) {
+	switch (type) {
+	case duckdb::ExpressionType::COMPARE_LESSTHAN:
+		return duckdb::ExpressionType::COMPARE_GREATERTHAN;
+	case duckdb::ExpressionType::COMPARE_GREATERTHAN:
+		return duckdb::ExpressionType::COMPARE_LESSTHAN;
+	case duckdb::ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		return duckdb::ExpressionType::COMPARE_GREATERTHANOREQUALTO;
+	case duckdb::ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+		return duckdb::ExpressionType::COMPARE_LESSTHANOREQUALTO;
+	default:
+		return type; // = and != are symmetric
+	}
+}
+
+static bool IsTagCardinality(const duckdb::Expression &expr, const duckdb::LogicalGet &get, idx_t table_index) {
+	auto &unwrapped = UnwrapCasts(expr);
+	if (unwrapped.GetExpressionClass() != duckdb::ExpressionClass::BOUND_FUNCTION) {
+		return false;
+	}
+	auto &func = unwrapped.Cast<duckdb::BoundFunctionExpression>();
+	if (func.function.name != "cardinality" || func.children.size() != 1) {
+		return false;
+	}
+	auto &arg = UnwrapCasts(*func.children[0]);
+	if (arg.GetExpressionClass() != duckdb::ExpressionClass::BOUND_COLUMN_REF) {
+		return false;
+	}
+	auto &col = arg.Cast<duckdb::BoundColumnRefExpression>();
+	return ResolveSchemaColumn(get, table_index, col.binding) == COL_TAGS;
+}
+
+// Try to extract a bound on the number of tags from `cardinality(tags) <op> n`.
+// Only integral, non-negative constants are pushed down; other cases are left
+// for DuckDB to handle with post-filtering (which is slower but still correct).
+static bool TryExtractTagCount(const duckdb::Expression &expr, const duckdb::LogicalGet &get, idx_t table_index,
+                               TagCountFilter &out) {
+	if (expr.GetExpressionClass() != duckdb::ExpressionClass::BOUND_COMPARISON) {
+		return false;
+	}
+	auto &comp = expr.Cast<duckdb::BoundComparisonExpression>();
+
+	// Normalize to `cardinality(tags) <op> constant`, flipping the comparison
+	// if the query was written the other way around.
+	auto type = expr.GetExpressionType();
+	const duckdb::Expression *const_expr = nullptr;
+	if (IsTagCardinality(*comp.left, get, table_index)) {
+		const_expr = comp.right.get();
+	} else if (IsTagCardinality(*comp.right, get, table_index)) {
+		const_expr = comp.left.get();
+		type = FlipComparison(type);
+	} else {
+		return false;
+	}
+
+	auto &unwrapped = UnwrapCasts(*const_expr);
+	if (unwrapped.GetExpressionClass() != duckdb::ExpressionClass::BOUND_CONSTANT) {
+		return false;
+	}
+	auto &value = unwrapped.Cast<duckdb::BoundConstantExpression>().value;
+	if (value.IsNull() || !value.type().IsIntegral()) {
+		return false;
+	}
+
+	duckdb::Value as_bigint;
+	if (!value.DefaultTryCastAs(duckdb::LogicalType::BIGINT, as_bigint, nullptr)) {
+		return false;
+	}
+	const auto n = duckdb::BigIntValue::Get(as_bigint);
+	if (n < 0) {
+		return false;
+	}
+	const auto count = static_cast<uint64_t>(n);
+	const auto unbounded = std::numeric_limits<uint64_t>::max();
+
+	switch (type) {
+	case duckdb::ExpressionType::COMPARE_EQUAL:
+		out = {count, count};
+		return true;
+	case duckdb::ExpressionType::COMPARE_NOTEQUAL:
+		// A hole in the middle of the range isn't normally representable, but
+		// we can special-case zero since != 0 is the same as > 0.
+		if (count == 0) {
+			out = {1, unbounded};
+			return true;
+		} else {
+			return false;
+		}
+	case duckdb::ExpressionType::COMPARE_GREATERTHAN:
+		out = {count + 1, unbounded};
+		return true;
+	case duckdb::ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+		out = {count, unbounded};
+		return true;
+	case duckdb::ExpressionType::COMPARE_LESSTHAN:
+		// `< 0` matches nothing; we can express that as an empty range.
+		out = count == 0 ? TagCountFilter {1, 0} : TagCountFilter {0, count - 1};
+		return true;
+	case duckdb::ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		out = {0, count};
+		return true;
+	default:
+		return false;
+	}
+}
+
 static void OsmComplexFilterPushdown(duckdb::ClientContext &context, duckdb::LogicalGet &get,
                                      duckdb::FunctionData *bind_data_p,
                                      duckdb::vector<duckdb::unique_ptr<duckdb::Expression>> &filters) {
@@ -1293,6 +1469,15 @@ static void OsmComplexFilterPushdown(duckdb::ClientContext &context, duckdb::Log
 			}
 		}
 
+		// Try tag count pushdown. Repeated predicates narrow the range.
+		if (!consumed) {
+			TagCountFilter tcf;
+			if (TryExtractTagCount(*filters[i], get, get.table_index, tcf)) {
+				bind_data.tag_count_filter &= tcf;
+				consumed = true;
+			}
+		}
+
 		if (consumed) {
 			// Remove the filter: our pushdown is exact, so DuckDB doesn't
 			// need to re-evaluate it. This also allows the column pruning
@@ -1315,6 +1500,7 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 	state->type_filter = bind_data.type_filter;
 	state->id_filter = bind_data.id_filter;
 	state->tag_predicates = bind_data.tag_predicates;
+	state->tag_count_filter = bind_data.tag_count_filter;
 
 	// Determine which columns are projected
 	for (idx_t i = 0; i < input.column_ids.size(); i++) {
@@ -1337,7 +1523,8 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 
 	// Contradictory predicates, e.g. `kind IN ('node') AND kind IN ('area')`,
 	// or `kind = 'line' AND type = 'node'`
-	if (NoMatchingKindAndType(bind_data.kind_filter, bind_data.type_filter) || bind_data.id_filter.None()) {
+	if (NoMatchingKindAndType(bind_data.kind_filter, bind_data.type_filter) || bind_data.id_filter.None() ||
+	    bind_data.tag_count_filter.None()) {
 		state->exhausted = true;
 		return state;
 	}
@@ -1359,7 +1546,7 @@ static duckdb::unique_ptr<duckdb::GlobalTableFunctionState> OsmInitGlobal(duckdb
 	if (use_mp_manager) {
 		osmium::area::Assembler::config_type assembler_config;
 		state->mp_manager = std::make_unique<RelationAreaManager<osmium::area::Assembler>>(
-		    assembler_config, bind_data.tag_predicates, bind_data.id_filter);
+		    assembler_config, bind_data.tag_predicates, bind_data.id_filter, bind_data.tag_count_filter);
 
 		// Read relations, feed them to the MP manager (which filters
 		// using MatchesTagPredicates internally), and collect member way IDs
